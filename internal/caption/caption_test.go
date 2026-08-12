@@ -582,6 +582,18 @@ func TestBlockSetsItsCharacterSizeBeforeItsPosition(t *testing.T) {
 	}
 }
 
+func TestTTMLPreservesAnIdeographicSpaceSpan(t *testing.T) {
+	doc := `<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p><span>　</span></p></div></body></tt>`
+	parsed, err := ParseTTML([]byte(doc), 3840, 2160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Cues) != 1 || len(parsed.Cues[0].Blocks) != 1 ||
+		len(parsed.Cues[0].Blocks[0].Spans) != 1 || parsed.Cues[0].Blocks[0].Spans[0].Text != "　" {
+		t.Fatalf("ideographic space span was lost: %+v", parsed.Cues)
+	}
+}
+
 func TestARIBExtensionNamespaceVariants(t *testing.T) {
 	for _, ns := range []string{
 		"http://www.arib.or.jp/ns/arib-ttml/v1_0",
