@@ -13,10 +13,6 @@
       matchManagers: ["github-actions"],
       groupName: "GitHub Actions",
       automerge: true
-    },
-    {
-      matchUpdateTypes: ["major"],
-      separateMajorMinor: true
     }
   ]
 }
