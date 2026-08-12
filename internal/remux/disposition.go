@@ -58,7 +58,7 @@ func assetDescriptorDisposition(tag uint16) (Disposition, string) {
 	case si.TagEmergencyNews:
 		return DispositionPreserved, "emergency news has no transport stream equivalent"
 	case signaling.TagAssetGroup:
-		return DispositionPreserved, "hierarchical transmission grouping has no PMT equivalent"
+		return DispositionPreserved, "a video pair becomes a hierarchical transmission descriptor and picks the clock stream; the grouping itself has no PMT equivalent"
 	case signaling.TagMHHierarchy:
 		return DispositionPreserved, "layer dependencies cannot be expressed by a PMT alone"
 	case signaling.TagDependency:

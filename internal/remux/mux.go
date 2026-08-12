@@ -408,15 +408,27 @@ func (m *muxer) writeSI(muxTime int64) error {
 	return nil
 }
 
+// choosePCRPID puts the clock on the stream a receiver decodes by default.
+// A rain fade backup shares its asset group with the video it stands in for
+// and names a higher selection level, and being the smaller of the two it
+// often reaches the output first; carrying it is only ever provisional, so
+// the choice stays open until the stream the group leads with turns up.
 func choosePCRPID(streams []*stream) (pid uint16, final bool) {
-	for _, s := range streams {
-		if s.kind == KindVideo {
-			return s.pid, true
+	for _, kind := range [...]Kind{KindVideo, KindAudio} {
+		var backup *stream
+		for _, s := range streams {
+			if s.kind != kind {
+				continue
+			}
+			if s.group == nil || s.group.SelectionLevel == 0 {
+				return s.pid, kind == KindVideo
+			}
+			if backup == nil || s.group.SelectionLevel < backup.group.SelectionLevel {
+				backup = s
+			}
 		}
-	}
-	for _, s := range streams {
-		if s.kind == KindAudio {
-			return s.pid, false
+		if backup != nil {
+			return backup.pid, false
 		}
 	}
 	if len(streams) > 0 {
