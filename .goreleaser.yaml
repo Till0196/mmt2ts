@@ -1,0 +1,213 @@
+version: 2
+
+project_name: mmt2ts
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: mmt2ts-linux
+    main: ./cmd/mmt2ts
+    binary: mmt2ts
+    goos: 
+      - linux
+    goarch: 
+      - amd64
+      - arm64
+      - arm
+      - ppc64le
+      - s390x
+    goarm: 
+      - 7
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: mmt2ts-darwin
+    main: ./cmd/mmt2ts
+    binary: mmt2ts
+    goos: 
+      - darwin
+    goarch: 
+      - amd64
+      - arm64
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: mmt2ts-windows
+    main: ./cmd/mmt2ts
+    binary: mmt2ts
+    goos: 
+      - windows
+    goarch: 
+      - amd64
+      - arm64
+      - 386
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+
+  - id: ts2mmt-linux
+    main: ./cmd/ts2mmt
+    binary: ts2mmt
+    goos: 
+      - linux
+    goarch: 
+      - amd64
+      - arm64
+      - arm
+      - ppc64le
+      - s390x
+    goarm: 
+      - 7
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: ts2mmt-darwin
+    main: ./cmd/ts2mmt
+    binary: ts2mmt
+    goos: 
+      - darwin
+    goarch: 
+      - amd64
+      - arm64
+    
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: ts2mmt-windows
+    main: ./cmd/ts2mmt
+    binary: ts2mmt
+    goos: 
+      - windows
+    goarch: 
+      - amd64
+      - arm64
+      - 386
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+
+  - id: mmtcut-linux
+    main: ./cmd/mmtcut
+    binary: mmtcut
+    goos: 
+      - linux
+    goarch: 
+      - amd64
+      - arm64
+      - arm
+      - ppc64le
+      - s390x
+    goarm: 
+      - 7
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: mmtcut-darwin
+    main: ./cmd/mmtcut
+    binary: mmtcut
+    goos: 
+      - darwin
+    goarch: 
+      - amd64
+      - arm64
+    
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+  - id: mmtcut-windows
+    main: ./cmd/mmtcut
+    binary: mmtcut
+    goos: 
+      - windows
+    goarch: 
+      - amd64
+      - arm64
+      - 386
+    flags: 
+      - "-trimpath"
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+      - -s -w -X main.commit={{.Commit}}
+      - -s -w -X main.date={{.Date}}
+
+archives:
+  - name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}amd64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - docs/**/*
+
+nfpms:
+  - file_name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
+    ids:
+      - mmt2ts-linux
+      - ts2mmt-linux
+      - mmtcut-linux
+    maintainer: Till0196
+    description: MMT/TLV and MPEG-2 TS conversion tools
+    license: "Apache-2.0"
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    section: utils
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/mmt2ts/copyright
+        file_info:
+          mode: 0644
+      - src: ./NOTICE
+        dst: /usr/share/doc/mmt2ts/NOTICE
+        file_info:
+          mode: 0644
+
+checksum:
+  name_template: "checksums.sha256"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+sboms:
+  - artifacts: archive

@@ -1,0 +1,22 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ["config:recommended"],
+
+  enabledManagers: ["gomod", "github-actions"],
+
+  packageRules: [
+    {
+      matchManagers: ["gomod"],
+      groupName: "Go modules"
+    },
+    {
+      matchManagers: ["github-actions"],
+      groupName: "GitHub Actions",
+      automerge: true
+    },
+    {
+      matchUpdateTypes: ["major"],
+      separateMajorMinor: true
+    }
+  ]
+}
