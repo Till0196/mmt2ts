@@ -172,7 +172,7 @@ archives:
       - LICENSE
       - NOTICE
       - README.md
-      - docs/**/*
+      - docs/*
 
 nfpms:
   - file_name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
