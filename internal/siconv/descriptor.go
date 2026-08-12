@@ -554,9 +554,16 @@ func (c *Converter) siParameter(d si.Descriptor) Result {
 	for _, t := range p.Tables {
 		id, ok := TSTableID(t.TableID)
 		if !ok {
-			return unsupported(d, fmt.Sprintf("SI parameter names MMT table %#02x, which has no transport stream table", t.TableID))
+			// MMT-SI also advertises tables which have no MPEG-2 TS
+			// counterpart (for example AMT, table_id 0xfe).  Omit only
+			// those entries; a supported entry in the same descriptor is
+			// still useful in the TS SI parameter descriptor.
+			continue
 		}
 		tables = append(tables, mpegts.SIParameterTable{TableID: id, Description: t.Description})
+	}
+	if len(tables) == 0 {
+		return unsupported(d, "SI parameter names only MMT tables without a transport stream counterpart")
 	}
 	b, ok := mpegts.SIParameterDescriptor(p.Version, p.UpdateTime, tables)
 	if !ok {

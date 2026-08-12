@@ -86,6 +86,25 @@ func TestComponentDescriptorsUseConventionalTSValues(t *testing.T) {
 	}
 }
 
+func TestSIParameterDropsOnlyTablesWithoutTSCounterpart(t *testing.T) {
+	c := newTestConverter(TextARIB)
+	body := []byte{0x00, 0x12, 0x34,
+		si.TableIDMHEITPF, 0x01, 0x03,
+		si.TableIDAMT, 0x02, 0xaa, 0xbb,
+		si.TableIDMHBIT, 0x01, 0x10,
+	}
+	out, results := c.Loop([]si.Descriptor{mhDescriptor(si.TagMHSIParameter, body)}, InNetwork)
+	if len(results) != 1 || results[0].Status != StatusConverted {
+		t.Fatalf("results = %+v", results)
+	}
+	if len(out) < 2 || out[0] != mpegts.DescSIParameter {
+		t.Fatalf("output = % x", out)
+	}
+	if len(out) != 11 || out[5] != mpegts.TableIDEITPFActual || out[8] != mpegts.TableIDBIT {
+		t.Fatalf("filtered SI parameter = % x", out)
+	}
+}
+
 func TestExtendedEventIsSplitAndRenumbered(t *testing.T) {
 	c := newTestConverter(TextARIB)
 	var items []byte
