@@ -162,6 +162,28 @@ func TestStateTracksShortTables(t *testing.T) {
 	}
 }
 
+func TestActualSDTPrefersANamedStream(t *testing.T) {
+	// A self-stream MH-SDT that leaves tlv_stream_id at zero would otherwise
+	// pin the identity to the placeholder stream and make every later,
+	// properly named table look like a conflict.
+	body := func(service uint16) []byte {
+		b := binary.BigEndian.AppendUint16(nil, 0x0007)
+		b = append(b, 0xff)
+		b = binary.BigEndian.AppendUint16(b, service)
+		return append(b, 0xfd, 0x80, 0x00)
+	}
+	s := NewState()
+	s.PushTLVSection(longSection(TableIDMHSDTActual, 0x0000, 1, 0, 0, body(0x0060)))
+	s.PushTLVSection(longSection(TableIDMHSDTActual, 0xb112, 1, 0, 0, body(0x0060)))
+	sdt, ok := s.ActualSDT()
+	if !ok || sdt.TLVStreamID != 0xb112 {
+		t.Fatalf("ActualSDT = %+v, %v", sdt, ok)
+	}
+	if id := s.Identity(0x0060); id.TLVStreamID != 0xb112 || len(id.Conflicts) != 0 {
+		t.Fatalf("identity = %+v", id)
+	}
+}
+
 func TestIdentityReportsConflicts(t *testing.T) {
 	s := NewState()
 	nitBody := binary.BigEndian.AppendUint16(nil, 0xf000)

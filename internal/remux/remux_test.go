@@ -723,6 +723,93 @@ func TestFullProfileGeneratesSIFromMMTSI(t *testing.T) {
 	}
 }
 
+// testTLVStream is the stream the SI built by withSI names.
+const testTLVStream = 0x0004
+
+func TestLateIdentityNeverNamesThePlaceholderStream(t *testing.T) {
+	// The MH-SDT and the TLV-NIT can trail the media by seconds; nothing that
+	// went out before them may claim to belong to transport stream 0x0000.
+	b := newBuilder()
+	b.buf.Write(buildStream(4, 3, 5, -1))
+	b.control(actualNIT(testTLVStream))
+	b.m2Section(0x8000, 0x8000, eventSection(testService, "テスト番組", "解説"))
+	b.m2Section(0x8004, 0x8000, serviceSection(testService, "放送", "テスト"))
+
+	var out bytes.Buffer
+	opts := DefaultOptions()
+	opts.ServiceID = testService
+	if _, err := Run(bytes.NewReader(b.buf.Bytes()), &out, opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct {
+		pid     uint16
+		tableID byte
+		name    string
+	}{
+		{mpegts.PIDSDT, mpegts.TableIDSDTActual, "SDT"},
+		{mpegts.PIDEIT, mpegts.TableIDEITPFActual, "EIT p/f"},
+	} {
+		sections := sectionsOn(out.Bytes(), want.pid, want.tableID)
+		if len(sections) == 0 {
+			t.Errorf("no %s was written once the identity arrived", want.name)
+		}
+		for _, s := range sections {
+			// The SDT names its own stream in the extension, the EIT names it
+			// in the transport_stream_id that follows the section header.
+			id := binary.BigEndian.Uint16(s[3:5])
+			if want.tableID == mpegts.TableIDEITPFActual {
+				id = binary.BigEndian.Uint16(s[8:10])
+			}
+			if id != testTLVStream {
+				t.Errorf("%s names transport stream %#04x, want %#04x", want.name, id, testTLVStream)
+			}
+		}
+	}
+
+	pat := sectionsOn(out.Bytes(), mpegts.PIDPAT, mpegts.TableIDPAT)
+	if len(pat) == 0 {
+		t.Fatal("no PAT was written")
+	}
+	byVersion := make(map[byte][]byte)
+	for _, s := range pat {
+		v := s[5] >> 1 & 0x1f
+		if prev, ok := byVersion[v]; ok && !bytes.Equal(prev, s) {
+			t.Fatalf("two different PATs share version %d: %x and %x", v, prev, s)
+		}
+		byVersion[v] = s
+	}
+	if tsid := binary.BigEndian.Uint16(pat[len(pat)-1][3:5]); tsid != testTLVStream {
+		t.Errorf("the last PAT names transport stream %#04x, want %#04x", tsid, testTLVStream)
+	}
+}
+
+func sectionsOn(ts []byte, pid uint16, tableID byte) [][]byte {
+	var out [][]byte
+	for off := 0; off+188 <= len(ts); off += 188 {
+		p := ts[off : off+188]
+		if p[0] != 0x47 || binary.BigEndian.Uint16(p[1:3])&0x1fff != pid || p[1]&0x40 == 0 {
+			continue
+		}
+		payload := p[4:]
+		if (p[3]>>4)&0x02 != 0 {
+			payload = p[5+int(p[4]):]
+		}
+		if len(payload) < 4 {
+			continue
+		}
+		payload = payload[1+int(payload[0]):]
+		if len(payload) < 3 || payload[0] != tableID {
+			continue
+		}
+		length := int(binary.BigEndian.Uint16(payload[1:3])&0x0fff) + 3
+		if length > len(payload) {
+			continue
+		}
+		out = append(out, bytes.Clone(payload[:length]))
+	}
+	return out
+}
+
 const testCaptionPID = 0xf130
 
 func (b *builder) ntp(clock uint64) {

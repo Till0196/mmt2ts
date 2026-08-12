@@ -4,9 +4,9 @@
 package remux
 
 import (
+	"bytes"
 	"container/heap"
 	"fmt"
-	"slices"
 
 	"mmt2ts/internal/codec"
 	"mmt2ts/internal/mpegts"
@@ -59,7 +59,7 @@ type muxer struct {
 	lastPCR    int64
 
 	patVersion byte
-	patBuilt   []mpegts.Program
+	patBuilt   []byte
 
 	siTables    []siTable
 	siGeneraton uint64
@@ -279,6 +279,9 @@ func (m *muxer) writePCRs(muxTime int64) error {
 }
 
 func (m *muxer) writePSI() error {
+	// Refresh SI first: it adopts a late identity and decides whether the
+	// stream carries a NIT, both of which the PAT below has to agree with.
+	m.refreshSI()
 	programs := make([]mpegts.Program, 0, len(m.c.packages))
 	for _, p := range m.c.packages {
 		if !p.pcrLocked {
@@ -290,12 +293,16 @@ func (m *muxer) writePSI() error {
 		}
 		programs = append(programs, mpegts.Program{Number: p.serviceID, PID: p.pmtPID})
 	}
-	if !slices.Equal(programs, m.patBuilt) {
-		m.patVersion = (m.patVersion + 1) & 0x1f
-		m.patBuilt = programs
-	}
 	m.c.pmtDirty, m.c.patDirty = false, false
+	// The transport stream id and the network PID can both settle after the
+	// first PAT, so version the table on its content rather than on the
+	// program list alone: a receiver drops a repeat that keeps its version.
 	pat := mpegts.BuildPAT(m.c.opts.TSID, m.patVersion, programs, m.networkPID())
+	if !bytes.Equal(pat, m.patBuilt) {
+		m.patVersion = (m.patVersion + 1) & 0x1f
+		pat = mpegts.BuildPAT(m.c.opts.TSID, m.patVersion, programs, m.networkPID())
+		m.patBuilt = pat
+	}
 	if err := m.w.WriteSection(mpegts.PIDPAT, pat); err != nil {
 		return err
 	}
@@ -346,6 +353,16 @@ func (m *muxer) networkPID() uint16 {
 }
 
 func (m *muxer) refreshSI() {
+	m.c.syncIdentity()
+	if m.c.opts.TSID == 0 {
+		// Hold SI back rather than name the placeholder stream 0x0000: a
+		// receiver reading the whole file would otherwise see two transport
+		// streams, the phantom one owning the service and its events.
+		// syncIdentity clears siBuilt once the real identity turns up.
+		m.siTables = nil
+		m.siGeneraton, m.siBuilt = m.c.si.Generation, true
+		return
+	}
 	if m.siBuilt && m.c.si.Generation == m.siGeneraton {
 		return
 	}
