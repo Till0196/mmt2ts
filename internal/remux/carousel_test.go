@@ -11,6 +11,7 @@ import (
 	"mmt2ts/internal/mpegts"
 	"mmt2ts/internal/preservation"
 	"mmt2ts/internal/signaling"
+	"mmt2ts/internal/timeline"
 	"mmt2ts/internal/tlv"
 	"mmt2ts/internal/tscheck"
 )
@@ -556,14 +557,18 @@ func assetGroupDescriptor(identification, selectionLevel byte) []byte {
 	return descriptor(signaling.TagAssetGroup, []byte{identification, selectionLevel})
 }
 
-func TestARainFadeVideoPairIsDescribedAsHierarchicalTransmission(t *testing.T) {
+// buildRainFadePair carries one asset group holding the video a receiver
+// shows and the backup that stands in for it during rain fade.  The backup
+// is on the air throughout; mainStartsAt is the MPU the video it backs up
+// first appears on, which on a real stream trails it by whole seconds.
+func buildRainFadePair(mpuCount, mainStartsAt int) []byte {
 	b := newBuilder()
-	const secondVideoPID = 0xf101
-	seqA := []uint32{100, 101, 102}
-	seqB := []uint32{300, 301, 302}
+	seqA := make([]uint32, mpuCount)
+	seqB := make([]uint32, mpuCount)
 	timesA := map[uint32]uint64{}
 	timesB := map[uint32]uint64{}
 	for i := range seqA {
+		seqA[i], seqB[i] = uint32(100+i), uint32(300+i)
 		when := testNTPBase + uint64(i)*2*testVideoTick<<32/testTimescale
 		timesA[seqA[i]], timesB[seqB[i]] = when, when
 	}
@@ -576,7 +581,7 @@ func TestARainFadeVideoPairIsDescribedAsHierarchicalTransmission(t *testing.T) {
 	b.mmtp(0x0000, 0x02, false, signalingPayload(pltTable(1)), 0)
 	b.mmtp(testMPTPID, 0x02, false, signalingPayload(mptTable(1, []testAsset{
 		videoAsset(testVideoPID, 0x0000, 0, seqA, timesA),
-		videoAsset(secondVideoPID, 0x0001, 1, seqB, timesB),
+		videoAsset(backupVideoPID, 0x0001, 1, seqB, timesB),
 	})), 0)
 	writeVideo := func(pid uint16, seq uint32) {
 		b.mmtp(pid, 0x00, true, mpuPayload(seq, nal(35, 3)), 0)
@@ -586,10 +591,18 @@ func TestARainFadeVideoPairIsDescribedAsHierarchicalTransmission(t *testing.T) {
 		b.mmtp(pid, 0x00, false, mpuPayload(seq, nal(19, 64)), 0)
 	}
 	for i := range seqA {
-		writeVideo(testVideoPID, seqA[i])
-		writeVideo(secondVideoPID, seqB[i])
+		writeVideo(backupVideoPID, seqB[i])
+		if i >= mainStartsAt {
+			writeVideo(testVideoPID, seqA[i])
+		}
 	}
-	_, _, out := convert(t, b.buf.Bytes())
+	return b.buf.Bytes()
+}
+
+const backupVideoPID = 0xf101
+
+func TestARainFadeVideoPairIsDescribedAsHierarchicalTransmission(t *testing.T) {
+	_, _, out := convert(t, buildRainFadePair(3, 0))
 
 	streams := pmtStreams(out)
 	for _, tc := range []struct {
@@ -614,6 +627,37 @@ func TestARainFadeVideoPairIsDescribedAsHierarchicalTransmission(t *testing.T) {
 		if got := binary.BigEndian.Uint16(body[1:3]) & 0x1fff; got != tc.peer {
 			t.Errorf("PID %#04x reference_PID = %#04x, want %#04x", tc.pid, got, tc.peer)
 		}
+	}
+}
+
+func TestTheClockLandsOnTheVideoTheGroupLeadsWith(t *testing.T) {
+	// The backup is alone on the air long enough to be written before the
+	// video it stands in for exists, so the clock has to move off it again:
+	// a PCR on the rain fade stream leaves a receiver reading the time from
+	// a picture it never decodes.  A short reorder window puts the first
+	// packets out early, the way a long stream does once its window fills.
+	var buf bytes.Buffer
+	opts := DefaultOptions()
+	opts.ServiceID = 1
+	opts.ReorderWindow = timeline.Hz / 10
+	if _, err := Run(bytes.NewReader(buildRainFadePair(20, 8)), &buf, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.Bytes()
+	check, err := tscheck.Scan(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("tscheck: %v", err)
+	}
+	pmt := lastSection(out, 0x0100, mpegts.TableIDPMT)
+	if pmt == nil {
+		t.Fatal("no PMT was written")
+	}
+	if pcr := binary.BigEndian.Uint16(pmt[8:10]) & 0x1fff; pcr != 0x1011 {
+		t.Errorf("PCR PID = %#04x, want the video the group leads with, %#04x", pcr, 0x1011)
+	}
+	if check.Errors() != 0 {
+		tscheck.WriteReport(testWriter{t}, check)
+		t.Fatalf("independent check found %d problems", check.Errors())
 	}
 }
 
