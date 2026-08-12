@@ -367,7 +367,7 @@ func (p *ttmlParser) body(dec *xml.Decoder, body xml.StartElement) error {
 			stack = append(stack, f)
 		case xml.CharData:
 			text := string(t)
-			if strings.TrimSpace(text) == "" {
+			if strings.Trim(text, " \t\r\n") == "" {
 				continue
 			}
 			if block == nil {
@@ -459,7 +459,11 @@ func attr(e xml.StartElement, space, local string) string {
 	return ""
 }
 
-func collapse(s string) string { return strings.Join(strings.Fields(s), " ") }
+func collapse(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}), " ")
+}
 
 func (p *ttmlParser) time(v string) (Ticks, bool) {
 	v = strings.TrimSpace(v)
