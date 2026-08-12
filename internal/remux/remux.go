@@ -131,6 +131,7 @@ type converter struct {
 	reservedTags map[byte]bool
 
 	descriptors    map[uint16]*DescriptorStat
+	identityGen    uint64
 	pmtDirty       bool
 	patDirty       bool
 	report         Report
@@ -142,6 +143,32 @@ type converter struct {
 	curPacket      tlv.Packet
 	curDatagram    tlv.Datagram
 	haveDatagram   bool
+}
+
+// syncIdentity applies the transport stream identity once MMT-SI carries it.
+// The MH-SDT or the TLV-NIT can arrive well after the first MPT, so every
+// table generated until then would name the placeholder stream 0x0000; the
+// muxer asks before it writes so that the identity is adopted mid-stream.
+func (c *converter) syncIdentity() {
+	// Identity walks the whole SI state, and the muxer calls this per packet:
+	// nothing can change unless a section has been applied since the last look.
+	if c.opts.TSID != 0 || c.si.Generation == c.identityGen {
+		return
+	}
+	c.identityGen = c.si.Generation
+	id := c.si.Identity(c.opts.ServiceID)
+	if !id.HaveTLVStreamID || id.TLVStreamID == 0 {
+		return
+	}
+	c.opts.TSID = id.TLVStreamID
+	c.sigen.TSID = c.opts.TSID
+	for _, p := range c.packages {
+		p.sigen.TSID = c.opts.TSID
+	}
+	// Tables held back while the identity was unknown are due now.
+	c.mux.siBuilt = false
+	c.patDirty = true
+	c.pmtDirty = true
 }
 
 func Run(r io.Reader, w io.Writer, opts Options) (Report, error) {
@@ -378,12 +405,7 @@ func (c *converter) applyMPT(mpt *signaling.MPT) {
 	p.graphIssues = append(p.graphIssues[:0], graph.Issues...)
 	p.mptDescriptors = mpt.Descriptors
 	c.noteDescriptors(mpt.Descriptors)
-	if c.opts.TSID == 0 {
-		if id := c.si.Identity(c.opts.ServiceID); id.HaveTLVStreamID {
-			c.opts.TSID = id.TLVStreamID
-			c.sigen.TSID = c.opts.TSID
-		}
-	}
+	c.syncIdentity()
 	p.sigen.TSID = c.opts.TSID
 	if c.pres != nil {
 		c.pres.rec.SetService(c.opts.ServiceID, c.opts.TSID, c.networkID)

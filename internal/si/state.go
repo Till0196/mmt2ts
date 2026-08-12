@@ -251,10 +251,22 @@ func (s *State) SelfNetwork() (*NIT, bool) {
 }
 
 func (s *State) ActualSDT() (*SDT, bool) {
+	var fallback *SDT
 	for _, sdt := range s.SDT {
-		if sdt.Actual() {
+		if !sdt.Actual() {
+			continue
+		}
+		// A named stream wins over one that left tlv_stream_id at zero:
+		// picking the placeholder would pin the identity to stream 0x0000
+		// and turn every properly named table into a conflict.  Zero still
+		// answers when it is all the stream ever sends.
+		if sdt.TLVStreamID != 0 {
 			return sdt, true
 		}
+		fallback = sdt
+	}
+	if fallback != nil {
+		return fallback, true
 	}
 	return nil, false
 }
