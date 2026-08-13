@@ -228,6 +228,39 @@ func TestEITFullTSSectionRules(t *testing.T) {
 	}
 }
 
+func TestNITOnlyRenamesTheOutputTransportStream(t *testing.T) {
+	state := si.NewState()
+	state.NIT[0x000a] = &si.NIT{
+		TableID: si.TableIDTLVNITActual, NetworkID: 0x000a,
+		Streams: []si.NITStream{
+			{TLVStreamID: 0x1111, OriginalNetworkID: 0x000a},
+			{TLVStreamID: 0x2222, OriginalNetworkID: 0x000a},
+		},
+	}
+	state.SDT[si.SDTKey{TableID: si.TableIDMHSDTActual, TLVStreamID: 0x1111}] = &si.SDT{
+		TableID: si.TableIDMHSDTActual, TLVStreamID: 0x1111, OriginalNetworkID: 0x000a,
+		Services: []si.SDTService{{ServiceID: 1}},
+	}
+	g := NewGenerator(newTestConverter(TextARIB), state)
+	g.ServiceID, g.TSID = 1, 0xaaaa
+	table, ok := g.nit()
+	if !ok || len(table.Sections) != 1 {
+		t.Fatalf("NIT = %+v, ok %v", table, ok)
+	}
+	b := table.Sections[0]
+	if len(b) < 24 {
+		t.Fatalf("short NIT section: % x", b)
+	}
+	// With empty descriptor loops the two six-byte transport entries begin
+	// immediately after the 8-byte long-section header and four-byte NIT loop headers.
+	if got := binary.BigEndian.Uint16(b[12:14]); got != 0xaaaa {
+		t.Errorf("selected transport_stream_id = %#04x, want output %#04x", got, 0xaaaa)
+	}
+	if got := binary.BigEndian.Uint16(b[18:20]); got != 0x2222 {
+		t.Errorf("other transport_stream_id = %#04x, want original %#04x", got, 0x2222)
+	}
+}
+
 func mhComponentGroupBody(groupType byte, hasBitRate bool, groups []struct {
 	id      byte
 	caUnits []struct {

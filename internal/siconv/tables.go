@@ -147,10 +147,15 @@ func (g *Generator) nit() (Table, bool) {
 	}
 	network, _ := g.Conv.LoopTLV(nit.Descriptors, InNetwork)
 	streams := make([]mpegts.NITStream, 0, len(nit.Streams))
+	identity := g.State.Identity(g.ServiceID)
 	for _, s := range nit.Streams {
 		desc, _ := g.Conv.LoopTLV(s.Descriptors, InNetwork)
+		transportStreamID := s.TLVStreamID
+		if identity.HaveTLVStreamID && s.TLVStreamID == identity.TLVStreamID {
+			transportStreamID = g.TSID
+		}
 		streams = append(streams, mpegts.NITStream{
-			TransportStreamID: g.TSID,
+			TransportStreamID: transportStreamID,
 			OriginalNetworkID: s.OriginalNetworkID,
 			Descriptors:       desc,
 		})
