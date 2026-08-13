@@ -140,7 +140,13 @@ func (c *Converter) LoopTLV(list []si.Descriptor, where Placement) ([]byte, []Re
 		case si.TagTLVCableSystem:
 			r = unsupported(d, "the TLV cable delivery system describes a carrier the transport stream no longer has")
 		case si.TagTLVRemoteControlKey:
-			r = unsupported(d, "no transport stream network descriptor carries remote control key assignments")
+			if _, ok := si.ParseRemoteControlKey(d.Data); ok {
+				// nit() converts an unambiguous service assignment to the
+				// remote_control_key_id of each TS information descriptor.
+				r = converted(d, nil)
+			} else {
+				r = invalid(d)
+			}
 		default:
 			r = unsupported(d, "no converter for this TLV-SI tag")
 		}

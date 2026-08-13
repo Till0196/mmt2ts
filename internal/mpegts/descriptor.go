@@ -292,6 +292,13 @@ func ServiceListDescriptor(entries []ServiceListEntry) ([]byte, bool) {
 	return Descriptor(DescServiceList, body)
 }
 
+// TSInformationDescriptor returns the minimum TS information descriptor.
+// The transmission-type loop describes hierarchical transmission and cannot be
+// derived from a TLV remote-control-key descriptor, so it is left empty.
+func TSInformationDescriptor(remoteControlKeyID byte) ([]byte, bool) {
+	return Descriptor(DescTSInformation, []byte{remoteControlKeyID, 0x00})
+}
+
 func SystemManagementDescriptor(id uint16, additional []byte) ([]byte, bool) {
 	body := binary.BigEndian.AppendUint16(nil, id)
 	body = append(body, additional...)

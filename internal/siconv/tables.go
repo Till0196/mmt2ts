@@ -146,19 +146,58 @@ func (g *Generator) nit() (Table, bool) {
 		return Table{}, false
 	}
 	network, _ := g.Conv.LoopTLV(nit.Descriptors, InNetwork)
+	remoteKeys := make(map[uint16]byte)
+	for _, d := range nit.Descriptors {
+		if d.Tag == si.TagTLVRemoteControlKey {
+			if keys, ok := si.ParseRemoteControlKey(d.Data); ok {
+				for _, e := range keys.Entries {
+					remoteKeys[e.ServiceID] = e.KeyID
+				}
+			}
+		}
+	}
 	streams := make([]mpegts.NITStream, 0, len(nit.Streams))
 	identity := g.State.Identity(g.ServiceID)
 	for _, s := range nit.Streams {
 		desc, _ := g.Conv.LoopTLV(s.Descriptors, InNetwork)
+		var key byte
+		haveKey := false
+		ambiguous := false
+		for _, d := range s.Descriptors {
+			if d.Tag != si.TagTLVServiceList {
+				continue
+			}
+			for _, service := range si.ParseServiceList(d.Data) {
+				serviceKey, ok := remoteKeys[service.ServiceID]
+				if !ok {
+					continue
+				}
+				if !haveKey {
+					key, haveKey = serviceKey, true
+				} else if key != serviceKey {
+					ambiguous = true
+				}
+			}
+		}
+		if haveKey && !ambiguous {
+			if info, ok := mpegts.TSInformationDescriptor(key); ok {
+				desc = append(desc, info...)
+			}
+		}
 		transportStreamID := s.TLVStreamID
 		if identity.HaveTLVStreamID && s.TLVStreamID == identity.TLVStreamID {
 			transportStreamID = g.TSID
 		}
-		streams = append(streams, mpegts.NITStream{
+		stream := mpegts.NITStream{
 			TransportStreamID: transportStreamID,
 			OriginalNetworkID: s.OriginalNetworkID,
 			Descriptors:       desc,
-		})
+		}
+		if identity.HaveTLVStreamID && s.TLVStreamID == identity.TLVStreamID {
+			streams = append([]mpegts.NITStream{stream}, streams...)
+		} else {
+			streams = append(streams, stream)
+		}
 	}
 	sections := g.versioned("nit", func(v byte) [][]byte {
 		return mpegts.BuildNIT(mpegts.TableIDNITActual, nit.NetworkID, v, network, streams)

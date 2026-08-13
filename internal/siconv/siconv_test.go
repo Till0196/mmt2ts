@@ -233,8 +233,8 @@ func TestNITOnlyRenamesTheOutputTransportStream(t *testing.T) {
 	state.NIT[0x000a] = &si.NIT{
 		TableID: si.TableIDTLVNITActual, NetworkID: 0x000a,
 		Streams: []si.NITStream{
-			{TLVStreamID: 0x1111, OriginalNetworkID: 0x000a},
 			{TLVStreamID: 0x2222, OriginalNetworkID: 0x000a},
+			{TLVStreamID: 0x1111, OriginalNetworkID: 0x000a},
 		},
 	}
 	state.SDT[si.SDTKey{TableID: si.TableIDMHSDTActual, TLVStreamID: 0x1111}] = &si.SDT{
@@ -259,6 +259,48 @@ func TestNITOnlyRenamesTheOutputTransportStream(t *testing.T) {
 	if got := binary.BigEndian.Uint16(b[18:20]); got != 0x2222 {
 		t.Errorf("other transport_stream_id = %#04x, want original %#04x", got, 0x2222)
 	}
+}
+
+func TestNITConvertsUnambiguousRemoteControlKey(t *testing.T) {
+	state := si.NewState()
+	state.NIT[7] = &si.NIT{
+		TableID: si.TableIDTLVNITActual, NetworkID: 7,
+		Descriptors: []si.Descriptor{{Tag: si.TagTLVRemoteControlKey, Data: []byte{
+			2, 4, 0x01, 0x00, 0xff, 0xff, 8, 0x02, 0x00, 0xff, 0xff,
+		}}},
+		Streams: []si.NITStream{
+			{TLVStreamID: 0x1000, OriginalNetworkID: 7, Descriptors: []si.Descriptor{
+				{Tag: si.TagTLVServiceList, Data: []byte{0x01, 0x00, 0x01}},
+			}},
+			{TLVStreamID: 0x2000, OriginalNetworkID: 7, Descriptors: []si.Descriptor{
+				{Tag: si.TagTLVServiceList, Data: []byte{0x02, 0x00, 0x01}},
+			}},
+		},
+	}
+	state.SDT[si.SDTKey{TableID: si.TableIDMHSDTActual, TLVStreamID: 0x2000}] = &si.SDT{
+		TableID: si.TableIDMHSDTActual, TLVStreamID: 0x2000, OriginalNetworkID: 7,
+		Services: []si.SDTService{{ServiceID: 0x0200}},
+	}
+	g := NewGenerator(newTestConverter(TextARIB), state)
+	g.ServiceID = 0x0200
+	table, ok := g.nit()
+	if !ok || len(table.Sections) != 1 {
+		t.Fatalf("NIT = %+v, ok %v", table, ok)
+	}
+	b := table.Sections[0]
+	p := 8 + 2 + int(binary.BigEndian.Uint16(b[8:10])&0x0fff)
+	loopLen := int(binary.BigEndian.Uint16(b[p:p+2]) & 0x0fff)
+	loop := b[p+2 : p+2+loopLen]
+	n := int(binary.BigEndian.Uint16(loop[4:6]) & 0x0fff)
+	for d := loop[6 : 6+n]; len(d) >= 2 && len(d) >= 2+int(d[1]); d = d[2+int(d[1]):] {
+		if d[0] == mpegts.DescTSInformation {
+			if !bytes.Equal(d, []byte{mpegts.DescTSInformation, 2, 8, 0}) {
+				t.Fatalf("TS information descriptor = % x", d)
+			}
+			return
+		}
+	}
+	t.Fatal("TS information descriptor not found")
 }
 
 func mhComponentGroupBody(groupType byte, hasBitRate bool, groups []struct {
