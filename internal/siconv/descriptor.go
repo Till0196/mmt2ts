@@ -135,10 +135,19 @@ func (c *Converter) LoopTLV(list []si.Descriptor, where Placement) ([]byte, []Re
 			} else {
 				r = invalid(d)
 			}
-		case si.TagTLVSatelliteSystem:
-			r = unsupported(d, "the TLV satellite delivery system describes a carrier the transport stream no longer has")
-		case si.TagTLVCableSystem:
-			r = unsupported(d, "the TLV cable delivery system describes a carrier the transport stream no longer has")
+		case si.TagTLVSatelliteSystem, si.TagTLVCableSystem, si.TagTLVChannelBonding:
+			if d.Tag == si.TagTLVChannelBonding {
+				if _, ok := si.ParseChannelBondingCable(d.Data); !ok {
+					r = invalid(d)
+					break
+				}
+			}
+			b, ok := mpegts.Descriptor(byte(d.Tag), d.Data)
+			if !ok {
+				r = invalid(d)
+				break
+			}
+			r = converted(d, b)
 		case si.TagTLVRemoteControlKey:
 			if _, ok := si.ParseRemoteControlKey(d.Data); ok {
 				// nit() converts an unambiguous service assignment to the
