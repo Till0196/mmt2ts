@@ -254,6 +254,61 @@ func ParseBIT(s Section) (*BIT, bool) {
 	return out, true
 }
 
+type AMT struct {
+	Version  byte
+	Services []AMTService
+}
+
+type AMTService struct {
+	ServiceID       uint16
+	IPv6            bool
+	Source          []byte
+	SourceMask      byte
+	Destination     []byte
+	DestinationMask byte
+	Private         []byte
+}
+
+func ParseAMT(s Section) (*AMT, bool) {
+	b := s.Body
+	if len(b) < 2 {
+		return nil, false
+	}
+	out := &AMT{Version: s.Version}
+	count := int(binary.BigEndian.Uint16(b[0:2]) >> 6)
+	p := 2
+	for range count {
+		if len(b)-p < 4 {
+			return nil, false
+		}
+		svc := AMTService{
+			ServiceID: binary.BigEndian.Uint16(b[p : p+2]),
+			IPv6:      b[p+2]&0x80 != 0,
+		}
+		length := int(binary.BigEndian.Uint16(b[p+2:p+4]) & 0x03ff)
+		p += 4
+		if len(b)-p < length {
+			return nil, false
+		}
+		addresses := b[p : p+length]
+		width := 4
+		if svc.IPv6 {
+			width = 16
+		}
+		if len(addresses) < 2*width+2 {
+			return nil, false
+		}
+		svc.Source = append([]byte(nil), addresses[:width]...)
+		svc.SourceMask = addresses[width]
+		svc.Destination = append([]byte(nil), addresses[width+1:2*width+1]...)
+		svc.DestinationMask = addresses[2*width+1]
+		svc.Private = append([]byte(nil), addresses[2*width+2:]...)
+		out.Services = append(out.Services, svc)
+		p += length
+	}
+	return out, true
+}
+
 type CDT struct {
 	DownloadDataID    uint16
 	Version           byte

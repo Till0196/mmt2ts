@@ -495,3 +495,31 @@ func TestComponentGroupRejectsATruncatedDescriptor(t *testing.T) {
 		}
 	}
 }
+
+func TestDeliverySystemDescriptorsAreCarriedThrough(t *testing.T) {
+	c := newTestConverter(TextARIB)
+	satellite := []byte{0x01, 0x17, 0x27, 0x48, 0x11, 0x00, 0xe8, 0x02, 0x88, 0x60, 0x08}
+	cable := []byte{0x01, 0x11, 0x00, 0x00, 0xff, 0x12, 0x03, 0x00, 0x52, 0x74, 0x0f}
+	bonding := []byte{0x01, 0x47, 0x00, 0x00, 0xff, 0x22, 0x05, 0x00, 0x52, 0x74, 0x0f, 0x1c}
+	for _, one := range []struct {
+		tag  uint16
+		body []byte
+	}{
+		{si.TagTLVSatelliteSystem, satellite},
+		{si.TagTLVCableSystem, cable},
+		{si.TagTLVChannelBonding, bonding},
+	} {
+		out, results := c.LoopTLV([]si.Descriptor{mhDescriptor(one.tag, one.body)}, InNetwork)
+		if len(results) != 1 || results[0].Status != StatusConverted {
+			t.Fatalf("tag %#x: results = %+v", one.tag, results)
+		}
+		want := append([]byte{byte(one.tag), byte(len(one.body))}, one.body...)
+		if !bytes.Equal(out, want) {
+			t.Errorf("tag %#x: output = % x, want % x", one.tag, out, want)
+		}
+	}
+	_, results := c.LoopTLV([]si.Descriptor{mhDescriptor(si.TagTLVChannelBonding, bonding[:11])}, InNetwork)
+	if len(results) != 1 || results[0].Status != StatusInvalid {
+		t.Errorf("truncated bonding = %+v", results)
+	}
+}

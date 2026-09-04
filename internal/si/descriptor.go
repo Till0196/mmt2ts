@@ -50,6 +50,7 @@ const (
 	TagTLVServiceList      = 0x41
 	TagTLVSatelliteSystem  = 0x43
 	TagTLVCableSystem      = 0x44
+	TagTLVChannelBonding   = 0xf3
 	TagTLVRemoteControlKey = 0xcd
 	TagTLVSystemManagement = 0xfe
 )
@@ -607,6 +608,66 @@ func ParseSIParameter(d []byte) (*SIParameter, bool) {
 		p += 2 + length
 	}
 	return out, true
+}
+
+type ChannelBondingCarrier struct {
+	FrequencyHz uint64
+	FrameType   byte
+	FECOuter    byte
+	Modulation  byte
+	SymbolRate  uint64
+	FECInner    byte
+	GroupID     byte
+}
+
+func ParseChannelBondingCable(d []byte) ([]ChannelBondingCarrier, bool) {
+	if len(d) < 12 || len(d)%12 != 0 {
+		return nil, false
+	}
+	out := make([]ChannelBondingCarrier, 0, len(d)/12)
+	for p := 0; p+12 <= len(d); p += 12 {
+		record := d[p : p+12]
+		frequency, ok := bcdDigits(record[0:4])
+		if !ok {
+			return nil, false
+		}
+		rate, ok := bcdNibbles(record[7:11], 7)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, ChannelBondingCarrier{
+			FrequencyHz: frequency * 100,
+			FrameType:   record[5] >> 4,
+			FECOuter:    record[5] & 0x0f,
+			Modulation:  record[6],
+			SymbolRate:  rate * 100,
+			FECInner:    record[10] & 0x0f,
+			GroupID:     record[11],
+		})
+	}
+	return out, true
+}
+
+func bcdDigits(b []byte) (uint64, bool) {
+	return bcdNibbles(b, len(b)*2)
+}
+
+func bcdNibbles(b []byte, digits int) (uint64, bool) {
+	if digits > len(b)*2 {
+		return 0, false
+	}
+	var value uint64
+	for index := range digits {
+		nibble := b[index/2] >> 4
+		if index%2 == 1 {
+			nibble = b[index/2] & 0x0f
+		}
+		if nibble > 9 {
+			return 0, false
+		}
+		value = value*10 + uint64(nibble)
+	}
+	return value, true
 }
 
 type SystemManagement struct {

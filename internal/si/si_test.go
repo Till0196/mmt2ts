@@ -6,6 +6,7 @@ package si
 import (
 	"encoding/binary"
 	"errors"
+	"net"
 	"testing"
 
 	"mmt2ts/internal/mpegts"
@@ -206,5 +207,68 @@ func TestIdentityReportsConflicts(t *testing.T) {
 	}
 	if id := s.Identity(0x0060); len(id.Conflicts) == 0 {
 		t.Fatalf("conflicting tlv_stream_id not reported: %+v", id)
+	}
+}
+
+func TestParseChannelBondingCable(t *testing.T) {
+	body := []byte{0x01, 0x47, 0x00, 0x00, 0xff, 0x22, 0x05, 0x00, 0x52, 0x74, 0x0f, 0x1c}
+	carriers, ok := ParseChannelBondingCable(body)
+	if !ok || len(carriers) != 1 {
+		t.Fatalf("ParseChannelBondingCable = %v, %v", carriers, ok)
+	}
+	one := carriers[0]
+	if one.FrequencyHz != 147_000_000 {
+		t.Errorf("周波数が %d", one.FrequencyHz)
+	}
+	if one.FrameType != 0x02 || one.FECOuter != 0x02 {
+		t.Errorf("フレーム種別と外符号が %#x, %#x", one.FrameType, one.FECOuter)
+	}
+	if one.Modulation != 0x05 {
+		t.Errorf("変調が %#x", one.Modulation)
+	}
+	if one.SymbolRate != 5_274_000 {
+		t.Errorf("シンボルレートが %d", one.SymbolRate)
+	}
+	if one.FECInner != 0x0f || one.GroupID != 0x1c {
+		t.Errorf("内符号とグループが %#x, %#x", one.FECInner, one.GroupID)
+	}
+	// 12バイトの倍数でないものは記述子ではありません。
+	if _, ok := ParseChannelBondingCable(body[:11]); ok {
+		t.Error("短い記述子が読めてしまいました")
+	}
+}
+
+func TestParseAMT(t *testing.T) {
+	body := []byte{
+		0x00, 0x7f, // サービス1つ
+		0x00, 0x65, // service_id 101
+		0xfc, 0x22, // IPv6、ループ長34
+		0x24, 0x01, 0xdb, 0xc0, 0x10, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+		0x80, // 送信元マスク
+		0xff, 0x3e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xa0, 0x00, 0x10, 0x00,
+		0x80, // 宛先マスク
+	}
+	s, _, err := ParseSection(longSection(TableIDAMT, 0x0000, 15, 0, 0, body))
+	if err != nil {
+		t.Fatalf("ParseSection: %v", err)
+	}
+	amt, ok := ParseAMT(s)
+	if !ok || len(amt.Services) != 1 {
+		t.Fatalf("ParseAMT = %v, %v", amt, ok)
+	}
+	one := amt.Services[0]
+	if one.ServiceID != 101 || !one.IPv6 {
+		t.Errorf("サービスが %+v", one)
+	}
+	if one.SourceMask != 128 || one.DestinationMask != 128 {
+		t.Errorf("マスクが %d, %d", one.SourceMask, one.DestinationMask)
+	}
+	if net.IP(one.Destination).String() != "ff3e::a000:1000" {
+		t.Errorf("宛先が %s", net.IP(one.Destination))
+	}
+	if net.IP(one.Source).String() != "2401:dbc0:1000::2" {
+		t.Errorf("送信元が %s", net.IP(one.Source))
 	}
 }

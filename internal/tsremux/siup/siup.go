@@ -135,7 +135,7 @@ func (c *Converter) TLVDescriptors(loop []byte) []byte {
 		case si.TagTLVNetworkName:
 			body = c.text(d.body)
 		case si.TagTLVServiceList, si.TagTLVSystemManagement,
-			si.TagTLVSatelliteSystem, si.TagTLVCableSystem:
+			si.TagTLVSatelliteSystem, si.TagTLVCableSystem, si.TagTLVChannelBonding:
 			body = d.body
 		default:
 			c.dropped[d.tag]++
