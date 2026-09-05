@@ -327,11 +327,28 @@ func (d *Demuxer) pes(pid uint16, st *pidState, start bool, payload []byte, disc
 		}
 		st.pesOpen = true
 		st.pes = pes
+		// 長さを申告したパケットは、その分だけ届けば完結する。
+		// 次のパケットが始まるのを待たない。待つと、映像の次の
+		// ピクチャが来るまで音声が出ない。
+		st.declared = 0
+		if length := int(payload[4])<<8 | int(payload[5]); length > 0 {
+			st.declared = length - 3 - headerLen
+		}
 		st.body = append(st.body[:0], payload[9+headerLen:]...)
+		d.fullPES(pid, st)
 		return
 	}
 	if st.pesOpen {
 		st.body = append(st.body, payload...)
+		d.fullPES(pid, st)
+	}
+}
+
+// fullPES は申告どおりの長さが揃っていれば閉じる。
+func (d *Demuxer) fullPES(pid uint16, st *pidState) {
+	if st.declared > 0 && len(st.body) >= st.declared {
+		st.body = st.body[:st.declared]
+		d.closePES(pid, st)
 	}
 }
 
