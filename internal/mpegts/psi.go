@@ -16,6 +16,22 @@ const (
 	StreamTypeDSMCC   = 0x0b
 )
 
+// HasOptionalHeader は、そのストリームの PES が接頭辞のあとに任意ヘッダー
+// （フラグ、時刻、その他）を持つかどうか。
+//
+// ほとんどは持つ。持たないのは、符号化されたエレメンタリーストリーム以外を
+// 運ぶもの: 詰め物、限定受信、プログラムストリームの目録。それらはペイロード
+// が6バイト目から始まり、間には何も無い。
+func HasOptionalHeader(streamID byte) bool {
+	switch streamID {
+	// padding, private stream 2, ECM, EMM, DSM-CC, ITU-T H.222.1 type E,
+	// programme stream directory.
+	case 0xbe, 0xbf, 0xf0, 0xf1, 0xf2, 0xf8, 0xff:
+		return false
+	}
+	return true
+}
+
 func CarriesDSMCCSections(streamType byte) bool {
 	return streamType >= 0x0a && streamType <= 0x0d
 }
