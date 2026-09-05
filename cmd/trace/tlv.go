@@ -26,6 +26,12 @@ type asset struct {
 	times      map[uint32]uint64
 	extended   map[uint32]signaling.ExtendedEntry
 	video      bool
+	// アクセスユニット区切り NAL の型。HEVC は 35、H.264 は 9 で、読み方も違う。
+	audType int
+
+	// 中身まで要るのは種別 es のときだけ。tlv は長さしか見ないので、既定では集めない。
+	collect bool
+	nalus   [][]byte
 
 	// MPU の境界ごとに数え直す。放送は sample_number を 0 のままにしてくる。
 	current uint32
@@ -45,46 +51,60 @@ type asset struct {
 
 // unit はデータユニットを1つ食わせる。映像はアクセスユニット区切りで切り、
 // 音声は1データユニットが1アクセスユニット。
-func (a *asset) unit(data []byte, rap bool, emit func(index uint32, size int, rap bool)) {
+func (a *asset) unit(data []byte, rap bool, emit auFunc) {
 	if !a.trusted {
 		return
 	}
 	if a.video {
-		if isAUD(data) {
+		if a.isAUD(data) {
 			a.flush(emit)
 			a.start(rap)
 		}
 		if !a.open {
 			return
 		}
-		a.size += len(data)
-		a.rap = a.rap || rap
+		a.add(data, rap)
 		return
 	}
 	a.flush(emit)
 	a.start(rap)
+	a.add(data, rap)
+}
+
+// auFunc は組み立て終わったアクセスユニットを受け取る。
+// nalus は開始符号ではなく4バイトの長さを剥がした NAL の並びで、集めるように言われたときだけ入る。
+type auFunc func(index uint32, size int, rap bool, nalus [][]byte)
+
+func (a *asset) add(data []byte, rap bool) {
 	a.size += len(data)
+	a.rap = a.rap || rap
+	if a.collect && len(data) > 4 {
+		a.nalus = append(a.nalus, append([]byte(nil), data[4:]...))
+	}
 }
 
 func (a *asset) start(rap bool) {
 	a.index++
 	a.open, a.size, a.rap = true, 0, rap
+	a.nalus = nil
 }
 
-func (a *asset) flush(emit func(index uint32, size int, rap bool)) {
+func (a *asset) flush(emit auFunc) {
 	if !a.open || a.size == 0 {
 		a.open = false
 		return
 	}
-	emit(a.index, a.size, a.rap)
+	emit(a.index, a.size, a.rap, a.nalus)
 	a.open = false
 }
 
-// isAUD は HEVC のアクセスユニット区切りかどうか。データユニットは
-// 4バイトの長さが前に付く。
-func isAUD(unit []byte) bool {
+// isAUD はアクセスユニット区切りかどうか。データユニットは4バイトの長さが前に付く。
+func (a *asset) isAUD(unit []byte) bool {
 	if len(unit) < 6 || binary.BigEndian.Uint32(unit[:4]) < 2 {
 		return false
+	}
+	if a.audType == 9 {
+		return unit[4]&0x1f == 9
 	}
 	return (unit[4]>>1)&0x3f == 35
 }
@@ -92,25 +112,57 @@ func isAUD(unit []byte) bool {
 func traceTLV(out *bufio.Writer, file io.Reader) {
 	fmt.Fprintln(out, "# tlv")
 
-	reader := tlv.NewReader(file)
-	assembler := signaling.NewReassembler()
-	assets := map[uint16]*asset{}
-	units := make([]mmtp.DataUnit, 0, 64)
-	var base timeline.Base
-	var ntpCount, tlvCount, mmtpCount, nullCount, mpuCount, auCount uint64
-	emitter := func(holder *asset, sequence uint32) func(index uint32, size int, rap bool) {
-		return func(index uint32, size int, rap bool) {
-			dts, pts, ok := holder.times90k(&base, sequence, index)
-			if !ok {
-				return
-			}
+	var ntpCount, auCount uint64
+	stats := walkTLV(file, tlvHooks{
+		onNTP: func(value uint64) {
+			ntpCount++
+			fmt.Fprintf(out, "ntp n=%d value=0x%016x\n", ntpCount, value)
+		},
+		onMPT: func(line string) { fmt.Fprintln(out, line) },
+		onAU: func(a *asset, sequence, index uint32, dts, pts int64, size int, rap bool, _ [][]byte) {
 			auCount++
 			flag := 0
 			if rap {
 				flag = 1
 			}
 			fmt.Fprintf(out, "au pid=0x%04x mpu=%d idx=%d dts=%d pts=%d size=%d rap=%d\n",
-				holder.packetID, sequence, index, dts, pts, size, flag)
+				a.packetID, sequence, index, dts, pts, size, flag)
+		},
+	})
+	fmt.Fprintf(out, "end tlv=%d mmtp=%d null=%d mpu=%d au=%d\n",
+		stats.tlv, stats.mmtp, stats.null, stats.mpu, auCount)
+}
+
+// tlvHooks は TLV を1回舐める間に起きたことを受け取る。
+// 種別 tlv と種別 es で拾うものが違うだけで、辿り方は同じなので分けていない。
+type tlvHooks struct {
+	// collect はアクセスユニットの中身まで要るかどうか。要らないなら NAL は捨てる。
+	collect bool
+	onNTP   func(value uint64)
+	onMPT   func(line string)
+	onAU    func(a *asset, sequence, index uint32, dts, pts int64, size int, rap bool, nalus [][]byte)
+}
+
+type tlvStats struct {
+	tlv, mmtp, null, mpu uint64
+}
+
+func walkTLV(file io.Reader, hooks tlvHooks) tlvStats {
+	reader := tlv.NewReader(file)
+	assembler := signaling.NewReassembler()
+	assets := map[uint16]*asset{}
+	units := make([]mmtp.DataUnit, 0, 64)
+	var base timeline.Base
+	var stats tlvStats
+	emitter := func(holder *asset, sequence uint32) auFunc {
+		return func(index uint32, size int, rap bool, nalus [][]byte) {
+			dts, pts, ok := holder.times90k(&base, sequence, index)
+			if !ok {
+				return
+			}
+			if hooks.onAU != nil {
+				hooks.onAU(holder, sequence, index, dts, pts, size, rap, nalus)
+			}
 		}
 	}
 	lastMPT := ""
@@ -120,23 +172,24 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 		if err != nil {
 			break
 		}
-		tlvCount++
+		stats.tlv++
 		datagram, ok := reader.Datagram(packet)
 		if !ok {
 			continue
 		}
 		if datagram.IsNTP() && len(datagram.Payload) >= 48 {
-			ntpCount++
 			value := binary.BigEndian.Uint64(datagram.Payload[40:48])
 			base.Set(value)
-			fmt.Fprintf(out, "ntp n=%d value=0x%016x\n", ntpCount, value)
+			if hooks.onNTP != nil {
+				hooks.onNTP(value)
+			}
 			continue
 		}
 		message, err := mmtp.Parse(datagram.Payload)
 		if err != nil {
 			continue
 		}
-		mmtpCount++
+		stats.mmtp++
 
 		switch message.PayloadType {
 		case mmtp.PayloadTypeSignaling:
@@ -145,15 +198,17 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 					if table.MPT == nil {
 						continue
 					}
-					line := describeMPT(table.MPT, assets)
+					line := describeMPT(table.MPT, assets, hooks.collect)
 					if line != lastMPT {
-						fmt.Fprintln(out, line)
+						if hooks.onMPT != nil {
+							hooks.onMPT(line)
+						}
 						lastMPT = line
 					}
 				}
 			}
 		case mmtp.PayloadTypeMPU:
-			mpuCount++
+			stats.mpu++
 			holder := assets[message.PacketID]
 			if holder == nil {
 				continue
@@ -193,12 +248,11 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 	for _, holder := range assets {
 		holder.flush(emitter(holder, holder.current))
 	}
-	nullCount = reader.Stats().NullPackets
-	fmt.Fprintf(out, "end tlv=%d mmtp=%d null=%d mpu=%d au=%d\n",
-		tlvCount, mmtpCount, nullCount, mpuCount, auCount)
+	stats.null = reader.Stats().NullPackets
+	return stats
 }
 
-func describeMPT(mpt *signaling.MPT, assets map[uint16]*asset) string {
+func describeMPT(mpt *signaling.MPT, assets map[uint16]*asset, collect bool) string {
 	type row struct {
 		packetID uint16
 		kind     string
@@ -220,7 +274,12 @@ func describeMPT(mpt *signaling.MPT, assets map[uint16]*asset) string {
 			assets[packetID] = holder
 		}
 		holder.kind = entry.Type
-		holder.video = entry.Type == "hev1" || entry.Type == "hvc1"
+		holder.audType = 35
+		if entry.Type == "avc1" || entry.Type == "avc3" {
+			holder.audType = 9
+		}
+		holder.video = holder.audType == 9 || entry.Type == "hev1" || entry.Type == "hvc1"
+		holder.collect = collect && holder.video
 		for _, stamp := range entry.MPUTimestamps {
 			holder.times[stamp.Sequence] = stamp.NTP
 		}
