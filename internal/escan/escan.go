@@ -180,6 +180,19 @@ func (n nalu) rbspOf(codec Codec) []byte {
 	return rbsp(n.body[skip:])
 }
 
+// codeStart は開始符号の本当の先頭、つまりゼロの並びの先頭を返す。
+//
+// 開始符号の前のゼロは、後ろに続くアクセスユニットのものとして数える。
+// 詰め物のゼロを前のピクチャに足すと、ピクチャの大きさが「その後ろに何が来たか」で
+// 変わってしまう。MPEG-2 は3つより多くのゼロを平気で入れてくる。
+func codeStart(payload []byte, code int) int {
+	at := code
+	for at > 0 && payload[at-1] == 0 {
+		at--
+	}
+	return at
+}
+
 // splitAnnexB は開始符号で区切り、アクセスユニットの先頭にあたる NAL の位置も返す。
 //
 // 区切りは、ピクチャの先頭スライスと、その前に立つパラメータ集合や SEI で決める。
@@ -191,10 +204,7 @@ func (s *Scanner) splitAnnexB(payload []byte) ([]nalu, []int) {
 			i++
 			continue
 		}
-		at := i
-		if at > 0 && payload[at-1] == 0 {
-			at--
-		}
+		at := codeStart(payload, i)
 		start := i + 3
 		end := start
 		for end+3 <= len(payload) && !(payload[end] == 0 && payload[end+1] == 0 && payload[end+2] == 1) {

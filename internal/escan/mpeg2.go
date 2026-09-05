@@ -46,7 +46,7 @@ func (s *Scanner) pushMPEG2(payload []byte) []Picture {
 		code := payload[i+3]
 		if code == 0xb3 || code == 0xb8 || code == 0x00 {
 			if sawPicture || len(spans) == 0 {
-				spans = append(spans, span{start: i})
+				spans = append(spans, span{start: codeStart(payload, i)})
 				sawPicture = false
 			}
 		}
