@@ -64,6 +64,7 @@ func (s *Scanner) avcPicture(units []nalu, size int) (Picture, bool) {
 	st := &s.avc
 	picture := Picture{Structure: Frame, Size: size}
 	picStruct := -1
+	recovery := false
 	var sps *avcSPS
 
 	for _, unit := range units {
@@ -81,10 +82,14 @@ func (s *Scanner) avcPicture(units []nalu, size int) (Picture, bool) {
 			if sps == nil {
 				sps = st.anySPS()
 			}
+			body := unit.rbspOf(H264)
+			if avcHasRecoveryPoint(body) {
+				recovery = true
+			}
 			if sps == nil || !sps.picStructPresent {
 				continue
 			}
-			if v, ok := avcPicStruct(unit.rbspOf(H264), sps); ok {
+			if v, ok := avcPicStruct(body, sps); ok {
 				picStruct = v
 			}
 		case 1, 5:
@@ -119,9 +124,10 @@ func (s *Scanner) avcPicture(units []nalu, size int) (Picture, bool) {
 			default:
 				picture.Coding = 'i'
 			}
-			// 復号を始められるのは IDR だけ。
-			// 放送は recovery point SEI でしか入口を示さないことが多いが、その扱いは投入側の判断なのでここでは規格どおりに出す。
-			picture.RAP = unit.kind(H264) == 5
+			// IDR か、recovery point SEI。
+			// IDR が来ない放送では（interlace.md）、IDR だけを見ると
+			// 入口が永久に見つからない。
+			picture.RAP = unit.kind(H264) == 5 || recovery
 		}
 	}
 	if picture.Coding == 0 || sps == nil {
@@ -338,6 +344,21 @@ func parseAVCHRD(b *bits, s *avcSPS) {
 	s.cpbRemovalBits = int(b.u(5)) + 1
 	s.dpbOutputBits = int(b.u(5)) + 1
 	b.u(5) // time_offset_length
+}
+
+// avcHasRecoveryPoint は recovery point SEI が並んでいるかどうか。
+//
+// 中身は要らない。送られてきたということが、復号側にとっての「ここから始められる」
+// のすべてになる。recovery_frame_cnt はこのピクチャの何枚あとで完全になるかを言うもので、
+// 放送は 0 を送ってくる。
+func avcHasRecoveryPoint(payload []byte) bool {
+	found := false
+	forEachSEI(payload, func(kind int, _ []byte) {
+		if kind == 6 {
+			found = true
+		}
+	})
+	return found
 }
 
 func avcPicStruct(payload []byte, sps *avcSPS) (int, bool) {
