@@ -5,6 +5,7 @@
 package codecrev
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 )
@@ -34,47 +35,46 @@ func AnnexBToNALSamples(annexB []byte) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	total := 0
+	for _, nal := range nals {
+		total += 4 + len(nal)
+	}
+	buf := make([]byte, 0, total)
 	out := make([][]byte, 0, len(nals))
 	for _, nal := range nals {
-		sample := make([]byte, 4, 4+len(nal))
-		binary.BigEndian.PutUint32(sample, uint32(len(nal)))
-		sample = append(sample, nal...)
-		out = append(out, sample)
+		start := len(buf)
+		buf = binary.BigEndian.AppendUint32(buf, uint32(len(nal)))
+		buf = append(buf, nal...)
+		out = append(out, buf[start:len(buf):len(buf)])
 	}
 	return out, nil
 }
 
+var startCode3 = []byte{0, 0, 1}
+
+// 4 byte の開始符号は直前の一つのゼロだけを含み、それより前のゼロは手前の NAL に残す。
 func splitAnnexB(b []byte) ([][]byte, error) {
-	type startCode struct{ offset, length int }
-	var starts []startCode
-	for i := 0; i+2 < len(b); {
-		switch {
-		case i+3 < len(b) && b[i] == 0 && b[i+1] == 0 && b[i+2] == 0 && b[i+3] == 1:
-			starts = append(starts, startCode{i, 4})
-			i += 4
-		case b[i] == 0 && b[i+1] == 0 && b[i+2] == 1:
-			starts = append(starts, startCode{i, 3})
-			i += 3
-		default:
-			i++
+	var nals [][]byte
+	start := -1
+	for {
+		p := bytes.Index(b[max(start, 0):], startCode3)
+		if p < 0 {
+			break
 		}
+		p += max(start, 0)
+		end := p
+		if p > 0 && b[p-1] == 0 {
+			end--
+		}
+		if start >= 0 {
+			nals = append(nals, b[start:end])
+		}
+		start = p + 3
 	}
-	if len(starts) == 0 {
+	if start < 0 {
 		return nil, ErrNoStartCode
 	}
-	nals := make([][]byte, 0, len(starts))
-	for i, s := range starts {
-		nalStart := s.offset + s.length
-		nalEnd := len(b)
-		if i+1 < len(starts) {
-			nalEnd = starts[i+1].offset
-		}
-		if nalStart > nalEnd {
-			continue
-		}
-		nals = append(nals, b[nalStart:nalEnd])
-	}
-	return nals, nil
+	return append(nals, b[start:]), nil
 }
 
 type ADTSInfo struct {
@@ -195,9 +195,7 @@ func BuildAudioMuxElement(cfg ADTSInfo, rawAAC []byte) ([]byte, error) {
 		n -= 255
 	}
 	w.writeBits(uint32(n), 8)
-	for _, b := range rawAAC {
-		w.writeBits(uint32(b), 8)
-	}
+	w.writeBytes(rawAAC)
 	return w.buf, nil
 }
 
@@ -227,4 +225,23 @@ func (w *bitWriter) writeBits(v uint32, n int) {
 		w.buf[idx] |= bit << (7 - uint(w.pos&7))
 		w.pos++
 	}
+}
+
+func (w *bitWriter) writeBytes(bs []byte) {
+	shift := uint(w.pos & 7)
+	need := (w.pos+8*len(bs)+7)>>3 - len(w.buf)
+	if need > 0 {
+		w.buf = append(w.buf, make([]byte, need)...)
+	}
+	idx := w.pos >> 3
+	if shift == 0 {
+		copy(w.buf[idx:], bs)
+	} else {
+		for _, b := range bs {
+			w.buf[idx] |= b >> shift
+			w.buf[idx+1] |= b << (8 - shift)
+			idx++
+		}
+	}
+	w.pos += 8 * len(bs)
 }

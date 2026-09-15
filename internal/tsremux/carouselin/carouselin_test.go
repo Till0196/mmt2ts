@@ -96,15 +96,16 @@ func TestSegmentRoundTrip(t *testing.T) {
 	}
 	pushModule(t, r, 0x1d00, downloadID, 0x0100, preservation.Header{Kind: preservation.KindTimedSegment, LogicalID: 7}, payload)
 
-	got, ok := r.Realtime.Segments[7]
-	if !ok {
-		t.Fatal("segment 7 not decoded")
+	segments := r.Realtime.TakeSegments()
+	if len(segments) != 1 || segments[0].Sequence != 7 {
+		t.Fatalf("segments = %+v, want just sequence 7", segments)
 	}
+	got := segments[0].Records
 	if len(got) != 2 || got[0].Kind != preservation.RecordRawSignalling {
 		t.Fatalf("segment records = %+v", got)
 	}
-	if seqs := r.Realtime.SegmentSequences(); len(seqs) != 1 || seqs[0] != 7 {
-		t.Errorf("SegmentSequences = %v", seqs)
+	if again := r.Realtime.TakeSegments(); len(again) != 0 {
+		t.Errorf("TakeSegments handed the same segment out twice: %+v", again)
 	}
 }
 
@@ -183,19 +184,42 @@ func TestObjectCarouselRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCommittedObjectGenerationsRemainResolvable(t *testing.T) {
+func TestNewerObjectGenerationReplacesTheResolvedObject(t *testing.T) {
 	r := New()
 	downloadID := uint32(downloadObject)<<16 | testServiceID
 	pushObjectGeneration(t, r, downloadID, 1, 0, []byte("old generation"))
+	if got := string(r.Object.Resolved[1].Data); got != "old generation" {
+		t.Fatalf("first generation = %q", got)
+	}
 	pushObjectGeneration(t, r, downloadID, 2, 1, []byte("new generation"))
+	if got := len(r.Object.Resolved); got != 1 {
+		t.Fatalf("resolved objects = %d, want 1", got)
+	}
+	if got := string(r.Object.Resolved[1].Data); got != "new generation" {
+		t.Fatalf("second generation = %q", got)
+	}
+}
 
-	if got := len(r.Object.Snapshots); got != 2 {
-		t.Fatalf("snapshots = %d, want 2", got)
+func TestObjectResolvesWhenItsModuleArrivesAfterTheManifest(t *testing.T) {
+	r := New()
+	downloadID := uint32(downloadObject)<<16 | testServiceID
+	object := []byte("module arrives late")
+	sha := sha256.Sum256(object)
+	m := &preservation.Manifest{Generation: 1, UpdateNumber: 1,
+		Objects: []preservation.ManifestObject{{ID: 1, Class: preservation.ClassGenericAsset,
+			Path: "item.bin", OriginalSize: uint64(len(object)), OriginalSHA256: sha,
+			Parts: []preservation.ObjectPart{{ModuleID: 0x0100, ModuleVersion: 0,
+				PartNumber: 0, StoredLength: uint32(len(object)), StoredSHA256: sha}}}}}
+	payload, err := m.Encode()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := string(r.Object.Snapshots[0].Objects[1].Data); got != "old generation" {
-		t.Fatalf("old snapshot = %q", got)
+	pushModule(t, r, 0x1d01, downloadID, 0x0001, preservation.Header{Kind: preservation.KindObjectManifest, Flags: preservation.FlagCommit}, payload)
+	if _, ok := r.Object.Resolved[1]; ok {
+		t.Fatal("object resolved before its module arrived")
 	}
-	if got := string(r.Object.Snapshots[1].Objects[1].Data); got != "new generation" {
-		t.Fatalf("new snapshot = %q", got)
+	pushModule(t, r, 0x1d01, downloadID, 0x0100, preservation.Header{Kind: preservation.KindStaticObject}, object)
+	if got := string(r.Object.Resolved[1].Data); got != string(object) {
+		t.Fatalf("resolved = %q, want %q", got, object)
 	}
 }

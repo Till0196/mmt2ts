@@ -199,8 +199,16 @@ func pltTableFor(version byte, packages []testPackage) []byte {
 type testAsset struct {
 	assetType   string
 	packetID    uint16
+	id          uint16 // 0 なら packetID
 	tag         uint16
 	descriptors []byte
+}
+
+func (a testAsset) assetID() uint16 {
+	if a.id != 0 {
+		return a.id
+	}
+	return a.packetID
 }
 
 func mptTable(version byte, assets []testAsset) []byte {
@@ -216,7 +224,7 @@ func mptTableFor(version byte, service uint16, assets []testAsset) []byte {
 		body = append(body, 0x00)
 		body = binary.BigEndian.AppendUint32(body, 0x00000000)
 		body = append(body, 2)
-		body = binary.BigEndian.AppendUint16(body, a.packetID)
+		body = binary.BigEndian.AppendUint16(body, a.assetID())
 		body = append(body, a.assetType...)
 		body = append(body, 0x00)
 		body = append(body, 1)

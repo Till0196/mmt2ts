@@ -324,7 +324,11 @@ MPEG-2 TS
 ```
 
 保存カルーセルがある場合は、raw signalling、元asset identity、MPU対応、字幕資源などを
-優先して利用します。入力は`mmt2ts`が生成したTSに限定しません。保存カルーセルを持たない
+優先して利用します。保存情報は元の時刻より遅れてTSに現れる（timed segmentは閉じてから、
+AV対応表はMPUが閉じてから、静的objectはcommitとカルーセルの一周を経てから）ので、
+`tsremux`は届いたrecordを時刻順の待ち行列に積み、先読みの窓より前のものから書きます。
+access unitはAV対応表の項目で書き終えた分から捨て、objectが未着のactivationは届くまで
+待ちます。入力全体を溜めないので、メモリは窓の長さで決まります。入力は`mmt2ts`が生成したTSに限定しません。保存カルーセルを持たない
 ARIB準拠のHEVC放送TSでも、clearなHEVC/AACとPSI/SIから新しいMMT/TLVを構成できます。
 MPEG-2 VideoなどHEVC以外の映像を含む放送TSは、この一般TS入力経路の対象外です。
 

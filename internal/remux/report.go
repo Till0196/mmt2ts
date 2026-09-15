@@ -495,6 +495,9 @@ func writeCarouselReport(w io.Writer, r Report) {
 		r.CarouselRealtimePID, c.RealtimeModule, r.CarouselObjectPID, c.ObjectModule, c.CarouselBytes)
 	fmt.Fprintf(w, "  segments %d, records %d, AV map entries %d, codec configs %d, losses %d\n",
 		c.Segments, c.Records, c.AVMapEntries, c.CodecConfigs, c.LossEntries)
+	if c.Epochs > 0 {
+		fmt.Fprintf(w, "  clock jumps: %d (the NTP clock moved by more than 10 s forward or 2 s back; each starts a new epoch)\n", c.Epochs)
+	}
 	window := "profile default"
 	if c.ShortSegments {
 		window = "shortened for the preserved bitrate"

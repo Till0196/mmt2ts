@@ -24,11 +24,11 @@ type Header struct {
 }
 
 type Sequencer struct {
-	next map[uint16]uint32
+	next [1 << 16]uint32
 }
 
 func NewSequencer() *Sequencer {
-	return &Sequencer{next: make(map[uint16]uint32)}
+	return &Sequencer{}
 }
 
 func (s *Sequencer) Next(pid uint16) uint32 {
@@ -44,6 +44,11 @@ func (s *Sequencer) ObserveRaw(pid uint16, sequence uint32) { s.next[pid] = sequ
 func TimestampFromNTP(ntp uint64) uint32 { return uint32(ntp >> 16) }
 
 func BuildPacket(h Header, payload []byte) []byte {
+	out := make([]byte, 0, 20+len(h.Extension)+len(payload))
+	return append(AppendPacketHeader(out, h), payload...)
+}
+
+func AppendPacketHeader(dst []byte, h Header) []byte {
 	b0 := byte(0x04)
 	if h.HasCounter {
 		b0 |= 0x20
@@ -54,8 +59,7 @@ func BuildPacket(h Header, payload []byte) []byte {
 	if len(h.Extension) != 0 {
 		b0 |= 0x02
 	}
-	out := make([]byte, 0, 20+len(h.Extension)+len(payload))
-	out = append(out, b0, 0xc0|h.PayloadType&0x3f)
+	out := append(dst, b0, 0xc0|h.PayloadType&0x3f)
 	out = binary.BigEndian.AppendUint16(out, h.PacketID)
 	out = binary.BigEndian.AppendUint32(out, h.Timestamp)
 	out = binary.BigEndian.AppendUint32(out, h.SequenceNumber)
@@ -67,7 +71,7 @@ func BuildPacket(h Header, payload []byte) []byte {
 		out = binary.BigEndian.AppendUint16(out, uint16(len(h.Extension)))
 		out = append(out, h.Extension...)
 	}
-	return append(out, payload...)
+	return out
 }
 
 var ClearScrambleExtension = []byte{0x80, 0x01, 0x00, 0x01, 0xe0}
@@ -91,18 +95,41 @@ func BuildTimedMFU(mpuSequence, sampleNumber uint32, data []byte) []byte {
 }
 
 func BuildTimedMFUFragments(mpuSequence, sampleNumber uint32, data []byte) [][]byte {
-	return buildTimedMFUFragments(mpuSequence, sampleNumber, data, false)
-}
-
-func BuildBroadcastTimedMFUFragments(mpuSequence uint32, data []byte) [][]byte {
-	return buildTimedMFUFragments(mpuSequence, 0, data, true)
-}
-
-func buildTimedMFUFragments(mpuSequence, sampleNumber uint32, data []byte, zeroOffset bool) [][]byte {
-	if len(data) <= MaxFragmentPayload {
-		return [][]byte{BuildTimedMFU(mpuSequence, sampleNumber, data)}
-	}
 	out := make([][]byte, 0, (len(data)+MaxFragmentPayload-1)/MaxFragmentPayload)
+	ForEachTimedMFUFragment(data, func(f TimedMFUFragment) error {
+		out = append(out, timedMFUPayload(mpuSequence, sampleNumber, f.Indicator, f.Offset, f.Data))
+		return nil
+	})
+	return out
+}
+
+func timedMFUPayload(mpuSequence, sampleNumber uint32, indicator byte, offset uint32, data []byte) []byte {
+	out := make([]byte, 0, mpuPayloadHeader+timedMFUHeader+len(data))
+	out = AppendTimedMFUHeader(out, mpuSequence, sampleNumber, indicator, offset, len(data))
+	return append(out, data...)
+}
+
+func AppendTimedMFUHeader(dst []byte, mpuSequence, sampleNumber uint32, indicator byte, offset uint32, dataLen int) []byte {
+	flags := byte(fragmentTypeMFU<<4) | timedFlag | indicator<<1
+	out := binary.BigEndian.AppendUint16(dst, uint16(mpuPayloadHeader-2+timedMFUHeader+dataLen))
+	out = append(out, flags, 0)
+	out = binary.BigEndian.AppendUint32(out, mpuSequence)
+	out = binary.BigEndian.AppendUint32(out, 0)
+	out = binary.BigEndian.AppendUint32(out, sampleNumber)
+	out = binary.BigEndian.AppendUint32(out, offset)
+	return append(out, 0, 0)
+}
+
+type TimedMFUFragment struct {
+	Indicator byte
+	Offset    uint32
+	Data      []byte
+}
+
+func ForEachTimedMFUFragment(data []byte, fn func(f TimedMFUFragment) error) error {
+	if len(data) <= MaxFragmentPayload {
+		return fn(TimedMFUFragment{Indicator: fragIndicatorComplete, Data: data})
+	}
 	for offset := 0; offset < len(data); {
 		n := min(MaxFragmentPayload, len(data)-offset)
 		var indicator byte
@@ -114,30 +141,12 @@ func buildTimedMFUFragments(mpuSequence, sampleNumber uint32, data []byte, zeroO
 		default:
 			indicator = fragIndicatorMiddle
 		}
-		fragmentOffset := uint32(offset)
-		if zeroOffset {
-			fragmentOffset = 0
+		if err := fn(TimedMFUFragment{Indicator: indicator, Offset: uint32(offset), Data: data[offset : offset+n]}); err != nil {
+			return err
 		}
-		out = append(out, timedMFUPayload(mpuSequence, sampleNumber, indicator, fragmentOffset, data[offset:offset+n]))
 		offset += n
 	}
-	return out
-}
-
-func timedMFUPayload(mpuSequence, sampleNumber uint32, indicator byte, offset uint32, data []byte) []byte {
-	flags := byte(fragmentTypeMFU<<4) | timedFlag | indicator<<1
-	rest := make([]byte, 0, mpuPayloadHeader-2+timedMFUHeader+len(data))
-	rest = append(rest, flags, 0)
-	rest = binary.BigEndian.AppendUint32(rest, mpuSequence)
-	rest = binary.BigEndian.AppendUint32(rest, 0)
-	rest = binary.BigEndian.AppendUint32(rest, sampleNumber)
-	rest = binary.BigEndian.AppendUint32(rest, offset)
-	rest = append(rest, 0, 0)
-	rest = append(rest, data...)
-
-	out := make([]byte, 0, 2+len(rest))
-	out = binary.BigEndian.AppendUint16(out, uint16(len(rest)))
-	return append(out, rest...)
+	return nil
 }
 
 func BuildNonTimedMFU(mpuSequence, itemID uint32, data []byte) []byte {
