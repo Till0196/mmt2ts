@@ -55,10 +55,12 @@ type StreamStats struct {
 	Statements      uint64
 	ManagementSent  uint64
 	Cues            uint64
+	Clears          uint64
 	CuesWithoutTime uint64
 	CuesWithoutEnd  uint64
 	Resources       map[string]uint64
 	ResourceBytes   uint64
+	FontGlyphs      uint64
 	Unsupported     map[string]uint64
 	Writer          WriterStats
 	Rounded         uint64
@@ -91,6 +93,7 @@ type Stream struct {
 	hints    []Hint
 	stats    StreamStats
 	drcs     *DRCS
+	fonts    fontGlyphs
 	lastMgmt int64
 	haveMgmt bool
 }
@@ -102,12 +105,17 @@ func NewStream(info AdditionalInfo, drcs *DRCS) *Stream {
 	if !ok {
 		w, h = 1920, 1080
 	}
-	return &Stream{
+	s := &Stream{
 		Info:    info,
 		Writer:  NewWriter(w, h, drcs),
 		pending: make(map[byte]*MFU),
 		drcs:    drcs,
+		fonts:   make(fontGlyphs),
 	}
+	if drcs != nil && drcs.Source == nil {
+		drcs.Source = s.fonts
+	}
+	return s
 }
 
 func (s *Stream) Stats() StreamStats {
@@ -168,6 +176,11 @@ func (s *Stream) finish() *MPU {
 		if m.DataType == DataTypeTTML && n == 0 {
 			out.TTML = m.Data
 			out.TTMLHeader = append([]byte(nil), m.Header...)
+		} else if glyphs := s.fontGlyphs(m); len(glyphs) > 0 {
+			for r, g := range glyphs {
+				s.fonts[r] = g
+			}
+			s.stats.FontGlyphs += uint64(len(glyphs))
 		} else {
 			r := Resource{Number: m.Number, DataType: m.DataType, Size: len(m.Data), Header: append([]byte(nil), m.Header...)}
 			if s.KeepResourceBytes {
@@ -190,6 +203,14 @@ func (s *Stream) finish() *MPU {
 	s.pending = make(map[byte]*MFU)
 	s.hints = nil
 	return out
+}
+
+// 書体は文書より先に来るとは限らないが、同じ MPU に載る。
+func (s *Stream) fontGlyphs(m *MFU) map[rune]Glyph {
+	if m.DataType != DataTypeSVGFont || s.drcs == nil {
+		return nil
+	}
+	return SVGFontGlyphs(m.Data)
 }
 
 func (s *Stream) checkHints(out *MPU) {
@@ -246,17 +267,28 @@ func (s *Stream) Convert(mpu *MPU, t Timing) ([]Output, error) {
 		times[i], timed[i] = s.cuePTS(cue, t)
 	}
 
+	cues := doc.Cues
+	if len(cues) == 0 {
+		// 空の文書は、出ている字幕を消す。
+		cues, times, timed = []Cue{{}}, []int64{t.MPUPresentation}, []bool{t.HasMPU}
+		s.stats.Clears++
+	}
 	var out []Output
 	if mgmt, ok := s.management(s.documentStart(times, timed, t)); ok {
 		out = append(out, mgmt)
 	}
-	for i, cue := range doc.Cues {
-		s.stats.Cues++
+	for i, cue := range cues {
 		pts, hasPTS := times[i], timed[i]
-		if !hasPTS {
-			s.stats.CuesWithoutTime++
+		var units []byte
+		if len(cue.Blocks) == 0 {
+			units = s.Writer.Clear()
+		} else {
+			s.stats.Cues++
+			if !hasPTS {
+				s.stats.CuesWithoutTime++
+			}
+			units = s.Writer.Cue(cue)
 		}
-		units := s.Writer.Cue(cue)
 		if defs := s.Writer.DRCS.Definitions(); len(defs) != 0 {
 			units = append(defs, units...)
 		}

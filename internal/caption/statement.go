@@ -86,22 +86,32 @@ func (w *Writer) Cue(c Cue) []byte {
 		sizeW, sizeH, haveSize = st.FontSizeW, st.FontSizeH, true
 		return w.size(st, cell)
 	}
+	area, hasArea := w.area(c, cell)
+	if hasArea {
+		b = append(b, csi(area.w, area.h, arib.CSISDF)...)
+		b = append(b, csi(area.x, area.y, arib.CSISDP)...)
+		w.stats.Scaled++
+	}
 	for _, blk := range c.Blocks {
-		if blk.HasRegion && blk.Region.HasExtent {
-			b = append(b, csi(w.scaleX(blk.Region.ExtentW), w.scaleY(blk.Region.ExtentH), arib.CSISDF)...)
-			w.stats.Scaled++
-		}
 		if len(blk.Spans) > 0 {
 			b = append(b, size(blk.Spans[0].Style)...)
 		}
-		if blk.HasRegion && blk.Region.HasOrigin {
-			b = append(b, csi(w.scaleX(blk.Region.OriginX), w.scaleY(blk.Region.OriginY), arib.CSISDP)...)
+		// 字を置いたあとの SDP/SDF は無視されるので、二つ目からの
+		// block は ACPS で置く。
+		if ox, oy := w.scaleX(blk.Region.OriginX), w.scaleY(blk.Region.OriginY); blk.HasRegion &&
+			blk.Region.HasOrigin && (ox != area.x || oy != area.y) {
+			var st Style
+			if len(blk.Spans) > 0 {
+				st = blk.Spans[0].Style
+			}
+			b = append(b, csi(ox, oy+w.linePitch(st, cell), arib.CSIACPS)...)
+		} else {
+			b = append(b, arib.CodeAPS, 0x40, 0x40)
 		}
-		b = append(b, arib.CodeAPS, 0x40, 0x40)
 		for _, span := range blk.Spans {
 			w.stats.Spans++
 			if span.NewLine {
-				b = append(b, arib.CodeAPD, arib.CodeAPR)
+				b = append(b, arib.CodeAPR)
 			}
 			b = append(b, size(span.Style)...)
 			if first || span.Style.Color != current.Color {
@@ -128,6 +138,56 @@ func (w *Writer) Cue(c Cue) []byte {
 		}
 	}
 	return arib.DataUnit(arib.UnitStatementBody, b)
+}
+
+type displayArea struct{ x, y, w, h int }
+
+// area は全 block の region を包む表示領域。TTML は region からはみ出た行も
+// そのまま出すが、表示領域の下端で一番上の行へ戻されるので、行が収まる
+// まで伸ばす。
+func (w *Writer) area(c Cue, cell cellGeometry) (displayArea, bool) {
+	var a displayArea
+	has := false
+	for _, blk := range c.Blocks {
+		if !blk.HasRegion || !blk.Region.HasOrigin {
+			continue
+		}
+		x, y := w.scaleX(blk.Region.OriginX), w.scaleY(blk.Region.OriginY)
+		bw, bh := 0, w.blockHeight(blk, cell)
+		if blk.Region.HasExtent {
+			bw, bh = w.scaleX(blk.Region.ExtentW), max(bh, w.scaleY(blk.Region.ExtentH))
+		}
+		if !has {
+			a, has = displayArea{x, y, bw, bh}, true
+			continue
+		}
+		right, bottom := max(a.x+a.w, x+bw), max(a.y+a.h, y+bh)
+		a.x, a.y = min(a.x, x), min(a.y, y)
+		a.w, a.h = right-a.x, bottom-a.y
+	}
+	if has {
+		a.w, a.h = min(a.w, planeWidth-a.x), min(a.h, planeHeight-a.y)
+	}
+	return a, has
+}
+
+func (w *Writer) blockHeight(blk Block, cell cellGeometry) int {
+	h, pitch := 0, 0
+	for i, span := range blk.Spans {
+		if span.NewLine || i == 0 {
+			h += pitch
+			pitch = 0
+		}
+		pitch = max(pitch, w.linePitch(span.Style, cell))
+	}
+	return h + pitch
+}
+
+func (w *Writer) linePitch(s Style, cell cellGeometry) int {
+	if w.sizeCode(s, cell) == arib.CodeSSZ {
+		return (cell.height + cell.vertical) / 2
+	}
+	return cell.height + cell.vertical
 }
 
 func (w *Writer) Clear() []byte { return arib.DataUnit(arib.UnitStatementBody, []byte{arib.CodeCS}) }
@@ -192,22 +252,39 @@ func (w *Writer) cell(c Cue) cellGeometry {
 	return g
 }
 
-func (w *Writer) size(s Style, cell cellGeometry) []byte {
+func (w *Writer) sizeCode(s Style, cell cellGeometry) byte {
 	if s.FontSizeH == 0 {
-		return c1(arib.CodeNSZ)
+		return arib.CodeNSZ
 	}
 	width, height := w.scaleX(s.FontSizeW), w.scaleY(s.FontSizeH)
-	code, name := byte(arib.CodeNSZ), "normal size"
-	wantW, wantH := cell.width, cell.height
 	switch {
 	case half(width, cell.width) && half(height, cell.height):
-		code, name = arib.CodeSSZ, "small size"
-		wantW, wantH = cell.width/2, cell.height/2
+		return arib.CodeSSZ
 	case half(width, cell.width):
-		code, name = arib.CodeMSZ, "middle size"
+		return arib.CodeMSZ
+	}
+	return arib.CodeNSZ
+}
+
+func (w *Writer) size(s Style, cell cellGeometry) []byte {
+	code := w.sizeCode(s, cell)
+	if s.FontSizeH == 0 {
+		return c1(code)
+	}
+	width, height := w.scaleX(s.FontSizeW), w.scaleY(s.FontSizeH)
+	name := "normal size"
+	wantW, wantH := cell.width, cell.height
+	switch code {
+	case arib.CodeSSZ:
+		name = "small size"
+		wantW, wantH = cell.width/2, cell.height/2
+	case arib.CodeMSZ:
+		name = "middle size"
 		wantW = cell.width / 2
-	case half(height, cell.height):
-		w.stats.note("tts:fontSize is half height at full width, which has no B24 character size")
+	default:
+		if half(height, cell.height) {
+			w.stats.note("tts:fontSize is half height at full width, which has no B24 character size")
+		}
 	}
 	if width != wantW || height != wantH {
 		w.stats.note(fmt.Sprintf("tts:fontSize %dx%d approximated by the %s of a %dx%d cell",
