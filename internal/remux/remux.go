@@ -675,22 +675,27 @@ func (c *converter) emitCaption(s *stream, done *caption.MPU) error {
 		s.stat.AUsCodecError++
 		return nil
 	}
+	superimposition := s.captionInfo.Superimposition()
 	for _, o := range out {
 		s.stat.AUsIn++
 		if !o.HasPTS {
 			o.PTS = timing.MPUPresentation
 		}
+		// 文字スーパーは PTS を持たない private_stream_2、字幕は PTS 付きの
+		// private_stream_1。時刻のない字幕文には MPU の時刻を付ける。
 		item := queued{
 			stream:        s,
 			dts:           o.PTS,
 			pts:           o.PTS,
 			streamID:      pes.StreamIDPrivate1,
 			payload:       c.mux.take(o.Payload),
-			noPTS:         !o.HasPTS,
+			noPTS:         superimposition,
 			discontinuity: s.discontinuity,
 			carryLoss:     s.carryLoss,
 		}
-		if o.HasPTS {
+		if superimposition {
+			item.streamID = pes.StreamIDPrivate2
+		} else {
 			item.privateData = []byte{
 				'C', 'C', 'I', 'S', 0x01, 0x3f,
 				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,

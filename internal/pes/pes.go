@@ -8,6 +8,7 @@ const (
 	StreamIDVideo    = 0xe0
 	StreamIDAudio    = 0xc0
 	StreamIDPrivate1 = 0xbd
+	StreamIDPrivate2 = 0xbf
 
 	HeaderOverhead = 9 + 10
 )
@@ -30,6 +31,15 @@ func Build(p Packet) []byte {
 }
 
 func AppendHeader(dst []byte, p Packet) []byte {
+	// private_stream_2 は任意ヘッダーを持たない。文字スーパーはこれで送る。
+	if p.StreamID == StreamIDPrivate2 {
+		out := append(dst, 0x00, 0x00, 0x01, p.StreamID)
+		length := len(p.Payload)
+		if length > 0xffff {
+			length = 0
+		}
+		return append(out, byte(length>>8), byte(length))
+	}
 	ptsBytes := 0
 	flags := byte(0)
 	switch {
