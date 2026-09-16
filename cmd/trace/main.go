@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -116,18 +117,26 @@ func traceTS(out *bufio.Writer, file io.Reader) {
 			break
 		}
 		if packet[0] != 0x47 {
-			// 同期を取り直す。1バイトずつ進める。
-			for {
-				b, err := reader.ReadByte()
-				if err != nil {
+			// 同期を取り直す。読んだ分の中に同期バイトがあればそこから、
+			// なければ1バイトずつ進める。
+			if i := bytes.IndexByte(packet[1:], 0x47); i >= 0 {
+				n := copy(packet, packet[1+i:])
+				if _, err := io.ReadFull(reader, packet[n:]); err != nil {
 					goto done
 				}
-				if b == 0x47 {
-					packet[0] = b
-					if _, err := io.ReadFull(reader, packet[1:]); err != nil {
+			} else {
+				for {
+					b, err := reader.ReadByte()
+					if err != nil {
 						goto done
 					}
-					break
+					if b == 0x47 {
+						packet[0] = b
+						if _, err := io.ReadFull(reader, packet[1:]); err != nil {
+							goto done
+						}
+						break
+					}
 				}
 			}
 		}
@@ -138,6 +147,7 @@ func traceTS(out *bufio.Writer, file io.Reader) {
 		d.Push(packet)
 	}
 done:
+	d.Flush()
 	for _, lost := range d.Lost {
 		count.cc += lost
 	}

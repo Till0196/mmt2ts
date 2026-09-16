@@ -24,9 +24,9 @@ const (
 // が6バイト目から始まり、間には何も無い。
 func HasOptionalHeader(streamID byte) bool {
 	switch streamID {
-	// padding, private stream 2, ECM, EMM, DSM-CC, ITU-T H.222.1 type E,
-	// programme stream directory.
-	case 0xbe, 0xbf, 0xf0, 0xf1, 0xf2, 0xf8, 0xff:
+	// program stream map, padding, private stream 2, ECM, EMM, DSM-CC,
+	// ITU-T H.222.1 type E, programme stream directory.
+	case 0xbc, 0xbe, 0xbf, 0xf0, 0xf1, 0xf2, 0xf8, 0xff:
 		return false
 	}
 	return true

@@ -98,6 +98,21 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 	units := make([]mmtp.DataUnit, 0, 64)
 	var base timeline.Base
 	var ntpCount, tlvCount, mmtpCount, nullCount, mpuCount, auCount uint64
+	emitter := func(holder *asset, sequence uint32) func(index uint32, size int, rap bool) {
+		return func(index uint32, size int, rap bool) {
+			dts, pts, ok := holder.times90k(&base, sequence, index)
+			if !ok {
+				return
+			}
+			auCount++
+			flag := 0
+			if rap {
+				flag = 1
+			}
+			fmt.Fprintf(out, "au pid=0x%04x mpu=%d idx=%d dts=%d pts=%d size=%d rap=%d\n",
+				holder.packetID, sequence, index, dts, pts, size, flag)
+		}
+	}
 	lastMPT := ""
 
 	for {
@@ -148,26 +163,14 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 				continue
 			}
 			if !holder.haveMPU || holder.current != payload.MPUSequence {
-				holder.flush(func(uint32, int, bool) {})
+				// 前の MPU の最後の AU は、次の MPU が始まって初めて閉じる。
+				holder.flush(emitter(holder, holder.current))
 				// 2つめ以降の MPU なら、先頭から見えている。
 				holder.trusted = holder.haveMPU
 				holder.current, holder.haveMPU = payload.MPUSequence, true
 				holder.index, holder.fragment = 0, nil
 			}
-			sequence := payload.MPUSequence
-			emit := func(index uint32, size int, rap bool) {
-				dts, pts, ok := holder.times90k(&base, sequence, index)
-				if !ok {
-					return
-				}
-				auCount++
-				flag := 0
-				if rap {
-					flag = 1
-				}
-				fmt.Fprintf(out, "au pid=0x%04x mpu=%d idx=%d dts=%d pts=%d size=%d rap=%d\n",
-					holder.packetID, sequence, index, dts, pts, size, flag)
-			}
+			emit := emitter(holder, payload.MPUSequence)
 			for _, unit := range payload.Units {
 				data := unit.Data
 				if !payload.Aggregation {
@@ -186,6 +189,9 @@ func traceTLV(out *bufio.Writer, file io.Reader) {
 				holder.unit(data, message.RAP, emit)
 			}
 		}
+	}
+	for _, holder := range assets {
+		holder.flush(emitter(holder, holder.current))
 	}
 	nullCount = reader.Stats().NullPackets
 	fmt.Fprintf(out, "end tlv=%d mmtp=%d null=%d mpu=%d au=%d\n",

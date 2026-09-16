@@ -43,6 +43,14 @@ func (s *series) min() float64 { return s.pct(0) }
 func (s *series) max() float64 { return s.pct(100) }
 func (s *series) med() float64 { return s.pct(50) }
 
+// jsonNumber は値のない指標を null にする。NaN は JSON にできない。
+func jsonNumber(v float64) any {
+	if math.IsNaN(v) {
+		return nil
+	}
+	return v
+}
+
 type stream struct {
 	pid        uint16
 	streamType byte
@@ -207,6 +215,12 @@ func main() {
 	total := 0
 	pkt := make([]byte, 0, 188)
 	for {
+		if *limit > 0 && total+len(buf) > *limit {
+			buf = buf[:max(*limit-total, 0)]
+			if len(buf) == 0 {
+				break
+			}
+		}
 		n, err := r.Read(buf)
 		for i := 0; i < n; i++ {
 			pkt = append(pkt, buf[i])
@@ -226,6 +240,7 @@ func main() {
 		}
 	}
 
+	d.Flush()
 	report(src, total, programs, *asJSON)
 }
 
@@ -309,19 +324,22 @@ func report(src string, total int, programs map[uint16]*program, asJSON bool) {
 			if p.video != nil {
 				e["videoPID"] = p.video.pid
 				e["videoType"] = p.video.streamType
-				e["videoPTSDeltaMed"] = p.video.ptsDelta.med()
-				e["videoReorderMax"] = p.video.reorder.max()
+				e["videoPTSDeltaMed"] = jsonNumber(p.video.ptsDelta.med())
+				e["videoReorderMax"] = jsonNumber(p.video.reorder.max())
 			}
 			if p.audio != nil {
 				e["audioPID"] = p.audio.pid
-				e["audioPTSDeltaMed"] = p.audio.ptsDelta.med()
+				e["audioPTSDeltaMed"] = jsonNumber(p.audio.ptsDelta.med())
 			}
-			e["skewP1"], e["skewMed"], e["skewP99"] = p.skew.pct(1), p.skew.med(), p.skew.pct(99)
+			e["skewP1"], e["skewMed"], e["skewP99"] = jsonNumber(p.skew.pct(1)), jsonNumber(p.skew.med()), jsonNumber(p.skew.pct(99))
 			out["programs"] = append(out["programs"].([]any), e)
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(out)
+		if err := enc.Encode(out); err != nil {
+			fmt.Fprintln(os.Stderr, "ptsprobe:", err)
+			os.Exit(1)
+		}
 		return
 	}
 

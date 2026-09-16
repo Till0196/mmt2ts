@@ -34,6 +34,7 @@ type mmtStream struct {
 	haveSeq  bool
 	auIndex  uint32
 	firstAU  []byte
+	fragment []byte
 	auSize   series
 	pending  int
 	lastPTS  int64
@@ -219,14 +220,21 @@ func probeMMT(r io.Reader, src string) {
 					if s.audio {
 						if mpu.Fragmentation == 1 {
 							s.pending = len(u.Data)
+							s.fragment = append(s.fragment[:0], u.Data...)
 						} else {
 							s.pending += len(u.Data)
+							s.fragment = append(s.fragment, u.Data...)
 						}
 					}
 					continue
 				}
 				if s.audio && s.firstAU == nil && len(u.Data) > 0 {
-					s.firstAU = append([]byte(nil), u.Data...)
+					// 断片化していたら、先頭からの断片をつないだものが AU。
+					if mpu.Fragmentation == 3 {
+						s.firstAU = append(append([]byte(nil), s.fragment...), u.Data...)
+					} else {
+						s.firstAU = append([]byte(nil), u.Data...)
+					}
 				}
 				if s.audio {
 					switch mpu.Fragmentation {
