@@ -50,13 +50,14 @@ const (
 )
 
 const (
-	CSISWF = 0x53
-	CSISDF = 0x56
-	CSISSM = 0x57
-	CSISHS = 0x58
-	CSISVS = 0x59
-	CSISDP = 0x5f
-	CSIORN = 0x63
+	CSISWF  = 0x53
+	CSISDF  = 0x56
+	CSISSM  = 0x57
+	CSISHS  = 0x58
+	CSISVS  = 0x59
+	CSISDP  = 0x5f
+	CSIACPS = 0x61
+	CSIORN  = 0x63
 )
 
 const (

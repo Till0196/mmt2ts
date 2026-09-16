@@ -372,8 +372,8 @@ func writeCaptionReport(w io.Writer, r Report) {
 		s := c.Stats
 		fmt.Fprintf(w, "  %04x %-15s lang %s TMD %#x DMF %#x: MPUs %d, documents %d, statements %d, management %d\n",
 			c.PID, kind, c.Language, c.TMD, c.DMF, s.MPUs, s.Documents, s.Statements, s.ManagementSent)
-		fmt.Fprintf(w, "       cues %d (%d without a presentation time), parse errors %d, incomplete MPUs %d\n",
-			s.Cues, s.CuesWithoutTime, s.ParseErrors, s.IncompleteMPUs)
+		fmt.Fprintf(w, "       cues %d (%d without a presentation time), empty documents cleared %d, parse errors %d, incomplete MPUs %d\n",
+			s.Cues, s.CuesWithoutTime, s.Clears, s.ParseErrors, s.IncompleteMPUs)
 		if s.CuesWithoutEnd > 0 {
 			fmt.Fprintf(w, "       %d cues carry no end time and rely on a later document to clear them\n",
 				s.CuesWithoutEnd)
@@ -383,6 +383,9 @@ func writeCaptionReport(w io.Writer, r Report) {
 			ch[0], ch[1], ch[2], ch[3], ch[4])
 		if len(s.Writer.Samples) > 0 {
 			fmt.Fprintf(w, "       characters with no encoding: %q\n", string(s.Writer.Samples))
+		}
+		if s.FontGlyphs > 0 {
+			fmt.Fprintf(w, "       SVG font glyphs carried as DRCS: %d\n", s.FontGlyphs)
 		}
 		if len(s.Resources) > 0 {
 			fmt.Fprintf(w, "       external resources not converted: %v (%d bytes)\n", s.Resources, s.ResourceBytes)

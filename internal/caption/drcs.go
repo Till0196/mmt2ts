@@ -6,6 +6,7 @@ package caption
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"slices"
 
 	"mmt2ts/internal/arib"
 )
@@ -23,19 +24,16 @@ type GlyphSource interface {
 type DRCS struct {
 	Source GlyphSource
 
-	codes   map[rune]uint16
-	byHash  map[[32]byte]uint16
-	next    uint16
-	pending []definition
+	codes  map[rune]uint16
+	byHash map[[32]byte]uint16
+	next   uint16
+	glyphs map[uint16]Glyph
+	// 文ごとに、使った字形を全部その文に載せる。途中から読み始めても届く。
+	used []uint16
 
 	Allocated uint64
 	Reused    uint64
 	Refused   uint64
-}
-
-type definition struct {
-	code  uint16
-	glyph Glyph
 }
 
 func NewDRCS(source GlyphSource) *DRCS {
@@ -44,6 +42,7 @@ func NewDRCS(source GlyphSource) *DRCS {
 		codes:  make(map[rune]uint16),
 		byHash: make(map[[32]byte]uint16),
 		next:   0x2121,
+		glyphs: make(map[uint16]Glyph),
 	}
 }
 
@@ -52,6 +51,7 @@ func (d *DRCS) AllocateDRCS(r rune) (uint16, bool) {
 		return 0, false
 	}
 	if code, ok := d.codes[r]; ok {
+		d.use(code)
 		return code, true
 	}
 	glyph, ok := d.Source.Glyph(r)
@@ -63,6 +63,7 @@ func (d *DRCS) AllocateDRCS(r rune) (uint16, bool) {
 	if code, ok := d.byHash[sum]; ok {
 		d.codes[r] = code
 		d.Reused++
+		d.use(code)
 		return code, true
 	}
 	code, ok := d.allocate()
@@ -72,9 +73,16 @@ func (d *DRCS) AllocateDRCS(r rune) (uint16, bool) {
 	}
 	d.codes[r] = code
 	d.byHash[sum] = code
-	d.pending = append(d.pending, definition{code: code, glyph: glyph})
+	d.glyphs[code] = glyph
 	d.Allocated++
+	d.use(code)
 	return code, true
+}
+
+func (d *DRCS) use(code uint16) {
+	if !slices.Contains(d.used, code) {
+		d.used = append(d.used, code)
+	}
 }
 
 func (d *DRCS) allocate() (uint16, bool) {
@@ -93,16 +101,17 @@ func (d *DRCS) allocate() (uint16, bool) {
 }
 
 func (d *DRCS) Definitions() []byte {
-	if d == nil || len(d.pending) == 0 {
+	if d == nil || len(d.used) == 0 {
 		return nil
 	}
-	body := []byte{byte(len(d.pending))}
-	for _, def := range d.pending {
-		body = binary.BigEndian.AppendUint16(body, def.code)
+	body := []byte{byte(len(d.used))}
+	for _, code := range d.used {
+		g := d.glyphs[code]
+		body = binary.BigEndian.AppendUint16(body, code)
 		body = append(body, 1)
-		body = append(body, 0x01, def.glyph.Depth, byte(def.glyph.Width), byte(def.glyph.Height))
-		body = append(body, def.glyph.Pattern...)
+		body = append(body, 0x01, g.Depth, byte(g.Width), byte(g.Height))
+		body = append(body, g.Pattern...)
 	}
-	d.pending = nil
+	d.used = d.used[:0]
 	return arib.DataUnit(arib.UnitDRCS2Byte, body)
 }
