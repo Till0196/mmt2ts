@@ -689,7 +689,7 @@ func (c *converter) emitCaption(s *stream, done *caption.MPU) error {
 			pts:           o.PTS,
 			streamID:      pes.StreamIDPrivate1,
 			payload:       c.mux.take(o.Payload),
-			noPTS:         superimposition,
+			noPTS:         superimposition || (!o.HasPTS && !timing.HasMPU),
 			discontinuity: s.discontinuity,
 			carryLoss:     s.carryLoss,
 		}

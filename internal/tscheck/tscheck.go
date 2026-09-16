@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+
+	"mmt2ts/internal/mpegts"
 )
 
 const packetSize = 188
@@ -416,7 +418,7 @@ func (s *scanner) pes(st *pidState, start bool, payload []byte) {
 	if start {
 		s.closePES(st)
 		st.pesOpen = false
-		if len(payload) < 9 {
+		if len(payload) < 6 {
 			st.stat.PESHeaderShort++
 			return
 		}
@@ -426,24 +428,31 @@ func (s *scanner) pes(st *pidState, start bool, payload []byte) {
 		}
 		st.stat.PESUnits++
 		declared := int(binary.BigEndian.Uint16(payload[4:6]))
-		headerLen := int(payload[8])
-		if len(payload) < 9+headerLen {
-			st.stat.PESHeaderShort++
-			return
+		body := payload[6:]
+		if mpegts.HasOptionalHeader(payload[3]) {
+			if len(payload) < 9 {
+				st.stat.PESHeaderShort++
+				return
+			}
+			headerLen := int(payload[8])
+			if len(payload) < 9+headerLen {
+				st.stat.PESHeaderShort++
+				return
+			}
+			flags := payload[7] >> 6
+			var pts, dts int64
+			havePTS, haveDTS := false, false
+			if flags&0x02 != 0 && headerLen >= 5 {
+				pts, havePTS = readTimestamp(payload[9:14]), true
+			}
+			if flags == 0x03 && headerLen >= 10 {
+				dts, haveDTS = readTimestamp(payload[14:19]), true
+			}
+			if havePTS {
+				s.observePTS(st, pts, dts, haveDTS)
+			}
+			body = payload[9+headerLen:]
 		}
-		flags := payload[7] >> 6
-		var pts, dts int64
-		havePTS, haveDTS := false, false
-		if flags&0x02 != 0 && headerLen >= 5 {
-			pts, havePTS = readTimestamp(payload[9:14]), true
-		}
-		if flags == 0x03 && headerLen >= 10 {
-			dts, haveDTS = readTimestamp(payload[14:19]), true
-		}
-		if havePTS {
-			s.observePTS(st, pts, dts, haveDTS)
-		}
-		body := payload[9+headerLen:]
 		st.loasDeclared = s.checkPayloadStart(st.stat, body)
 		st.pesOpen = true
 		st.pesDeclared = declared
