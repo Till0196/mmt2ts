@@ -94,6 +94,7 @@ type Stream struct {
 	stats    StreamStats
 	drcs     *DRCS
 	fonts    fontGlyphs
+	ownFonts bool // DRCS の字形をこの stream の SVG フォントから取る
 	lastMgmt int64
 	haveMgmt bool
 }
@@ -114,6 +115,7 @@ func NewStream(info AdditionalInfo, drcs *DRCS) *Stream {
 	}
 	if drcs != nil && drcs.Source == nil {
 		drcs.Source = s.fonts
+		s.ownFonts = true
 	}
 	return s
 }
@@ -176,18 +178,22 @@ func (s *Stream) finish() *MPU {
 		if m.DataType == DataTypeTTML && n == 0 {
 			out.TTML = m.Data
 			out.TTMLHeader = append([]byte(nil), m.Header...)
-		} else if glyphs := s.fontGlyphs(m); len(glyphs) > 0 {
-			for r, g := range glyphs {
-				s.fonts[r] = g
-			}
-			s.stats.FontGlyphs += uint64(len(glyphs))
 		} else {
 			r := Resource{Number: m.Number, DataType: m.DataType, Size: len(m.Data), Header: append([]byte(nil), m.Header...)}
 			if s.KeepResourceBytes {
 				r.Data = m.Data
 			}
 			out.Resources = append(out.Resources, r)
-			s.stats.resource(m.DataType, len(m.Data))
+			// 字形に落とした SVG フォントは、変換できなかった資源には数えない。
+			// 資源としては残す。保存にも hint の照合にも要る。
+			if glyphs := s.fontGlyphs(m); len(glyphs) > 0 {
+				for r, g := range glyphs {
+					s.fonts[r] = g
+				}
+				s.stats.FontGlyphs += uint64(len(glyphs))
+			} else {
+				s.stats.resource(m.DataType, len(m.Data))
+			}
 		}
 	}
 	out.LastNumber = last
@@ -207,7 +213,7 @@ func (s *Stream) finish() *MPU {
 
 // 書体は文書より先に来るとは限らないが、同じ MPU に載る。
 func (s *Stream) fontGlyphs(m *MFU) map[rune]Glyph {
-	if m.DataType != DataTypeSVGFont || s.drcs == nil {
+	if m.DataType != DataTypeSVGFont || !s.ownFonts {
 		return nil
 	}
 	return SVGFontGlyphs(m.Data)

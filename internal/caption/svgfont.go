@@ -263,7 +263,13 @@ func svgPath(d string) []step {
 				flush(c)
 				command = 0
 			}
-		case c >= '0' && c <= '9' || c == '.' || c == 'e' || c == 'E':
+		case c == '.':
+			// 二つ目の小数点は次の数の頭（M.5.5）。
+			if s := num.String(); strings.ContainsAny(s, ".eE") {
+				pushNumber()
+			}
+			num.WriteByte(c)
+		case c >= '0' && c <= '9' || c == 'e' || c == 'E':
 			num.WriteByte(c)
 		case c == '-' || c == '+':
 			// 符号は数の頭。指数の符号は続きのまま。

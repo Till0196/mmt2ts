@@ -92,22 +92,27 @@ func (w *Writer) Cue(c Cue) []byte {
 		b = append(b, csi(area.x, area.y, arib.CSISDP)...)
 		w.stats.Scaled++
 	}
-	for _, blk := range c.Blocks {
+	var prev Region
+	for i, blk := range c.Blocks {
 		if len(blk.Spans) > 0 {
 			b = append(b, size(blk.Spans[0].Style)...)
 		}
-		// 字を置いたあとの SDP/SDF は無視されるので、二つ目からの
-		// block は ACPS で置く。
-		if ox, oy := w.scaleX(blk.Region.OriginX), w.scaleY(blk.Region.OriginY); blk.HasRegion &&
-			blk.Region.HasOrigin && (ox != area.x || oy != area.y) {
+		// 字を置いたあとの SDP/SDF は無視されるので、二つ目からの block は
+		// ACPS で置く。前の block と同じ region なら、その下に続ける。
+		origin := w.origin(blk)
+		switch {
+		case i == 0 && origin == (displayArea{x: area.x, y: area.y}):
+			b = append(b, arib.CodeAPS, 0x40, 0x40)
+		case i > 0 && blk.Region == prev:
+			b = append(b, arib.CodeAPR)
+		default:
 			var st Style
 			if len(blk.Spans) > 0 {
 				st = blk.Spans[0].Style
 			}
-			b = append(b, csi(ox, oy+w.linePitch(st, cell), arib.CSIACPS)...)
-		} else {
-			b = append(b, arib.CodeAPS, 0x40, 0x40)
+			b = append(b, csi(origin.x, origin.y+w.linePitch(st, cell), arib.CSIACPS)...)
 		}
+		prev = blk.Region
 		for _, span := range blk.Spans {
 			w.stats.Spans++
 			if span.NewLine {
@@ -148,12 +153,21 @@ type displayArea struct{ x, y, w, h int }
 func (w *Writer) area(c Cue, cell cellGeometry) (displayArea, bool) {
 	var a displayArea
 	has := false
-	for _, blk := range c.Blocks {
-		if !blk.HasRegion || !blk.Region.HasOrigin {
+	var prev Region
+	stacked := 0
+	for i, blk := range c.Blocks {
+		if !blk.HasRegion {
 			continue
 		}
-		x, y := w.scaleX(blk.Region.OriginX), w.scaleY(blk.Region.OriginY)
-		bw, bh := 0, w.blockHeight(blk, cell)
+		// 同じ region に続く block は、前の block の下に積まれる。
+		if i == 0 || blk.Region != prev {
+			stacked = 0
+		}
+		prev = blk.Region
+		o := w.origin(blk)
+		x, y := o.x, o.y
+		stacked += w.blockHeight(blk, cell)
+		bw, bh := planeWidth-x, stacked
 		if blk.Region.HasExtent {
 			bw, bh = w.scaleX(blk.Region.ExtentW), max(bh, w.scaleY(blk.Region.ExtentH))
 		}
@@ -169,6 +183,14 @@ func (w *Writer) area(c Cue, cell cellGeometry) (displayArea, bool) {
 		a.w, a.h = min(a.w, planeWidth-a.x), min(a.h, planeHeight-a.y)
 	}
 	return a, has
+}
+
+// origin は region の左上。origin のない region は面の左上から。
+func (w *Writer) origin(blk Block) displayArea {
+	if !blk.HasRegion || !blk.Region.HasOrigin {
+		return displayArea{}
+	}
+	return displayArea{x: w.scaleX(blk.Region.OriginX), y: w.scaleY(blk.Region.OriginY)}
 }
 
 func (w *Writer) blockHeight(blk Block, cell cellGeometry) int {

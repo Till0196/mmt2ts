@@ -53,6 +53,9 @@ func TestSVGFontUpperHalfAndHoles(t *testing.T) {
 
 func TestSVGPathRelativeAndShorthandSteps(t *testing.T) {
 	steps := svgPath("m10,20 h30 v-5 l-10,10 q5,5 10,0 t10,0 c1,1 2,2 3,3 s1,1 2,2 z")
+	if got := svgPath("M.5.5L1e2.5-1"); len(got) != 2 || got[0].p[0] != (point{0.5, 0.5}) || got[1].p[0] != (point{100, 0.5}) {
+		t.Fatalf("adjacent decimals: %+v", got)
+	}
 	want := []step{
 		{kind: stepMove, p: [3]point{{10, 20}}},
 		{kind: stepLine, p: [3]point{{40, 20}}},
@@ -107,7 +110,7 @@ func TestStreamCarriesSVGFontGlyphsAsDRCS(t *testing.T) {
 }
 
 func containsDRCSDefinition(b []byte) bool {
-	for i := 0; i+6 < len(b); i++ {
+	for i := 0; i+7 < len(b); i++ {
 		if b[i] == 0x1f && b[i+1] == arib.UnitDRCS2Byte && b[i+5] == 1 && b[i+6] == 0x21 && b[i+7] == 0x21 {
 			return true
 		}
@@ -134,5 +137,23 @@ func TestTwoLinesGetADisplayAreaTallEnough(t *testing.T) {
 	}
 	if bytes.Contains(body, []byte{arib.CodeAPD, arib.CodeAPR}) {
 		t.Fatalf("a new line is APR alone, not APD then APR: % x", body)
+	}
+}
+
+// 同じ region に続く段落は、置き直さずに前の段落の下へ続ける。
+func TestParagraphsInOneRegionStack(t *testing.T) {
+	w := NewWriter(3840, 2160, nil)
+	st := Style{FontSizeW: 120, FontSizeH: 120}
+	region := Region{HasOrigin: true, OriginX: 800, OriginY: 160, HasExtent: true, ExtentW: 2376, ExtentH: 120}
+	body := w.Cue(Cue{Blocks: []Block{
+		{HasRegion: true, Region: region, Spans: []Span{{Text: "一", Style: st}}},
+		{HasRegion: true, Region: region, Spans: []Span{{Text: "二", Style: st}}},
+	}})[5:]
+	if bytes.Contains(body, []byte{arib.CSIACPS}) || bytes.Count(body, []byte{arib.CodeAPR}) != 1 {
+		t.Fatalf("the second paragraph is not a plain line feed: % x", body)
+	}
+	area := append([]byte{arib.CodeCSI}, "594;60"...)
+	if !bytes.Contains(body, append(area, 0x20, arib.CSISDF)) {
+		t.Fatalf("the area does not hold both paragraphs: % x", body)
 	}
 }
