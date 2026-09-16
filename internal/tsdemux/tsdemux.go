@@ -70,6 +70,7 @@ type pidState struct {
 	pesOpen  bool
 	pes      PES
 	body     []byte
+	bodyHint int
 	declared int
 }
 
@@ -343,7 +344,9 @@ func (d *Demuxer) pes(pid uint16, st *pidState, start bool, payload []byte, disc
 		if length := int(payload[4])<<8 | int(payload[5]); length > 0 {
 			st.declared = length - (body - 6)
 		}
-		st.body = append(st.body[:0], payload[body:]...)
+		// 閉じた PES の buffer は後段が持って行くので、使い回せない。
+		want := max(st.declared, st.bodyHint+st.bodyHint/8, len(payload)-body)
+		st.body = append(make([]byte, 0, want), payload[body:]...)
 		d.fullPES(pid, st)
 		return
 	}
@@ -368,6 +371,7 @@ func (d *Demuxer) closePES(pid uint16, st *pidState) {
 	st.pesOpen = false
 	pes := st.pes
 	pes.Payload = st.body
+	st.bodyHint = len(st.body)
 	st.body = nil
 	if d.Handlers.OnPES != nil {
 		d.Handlers.OnPES(pes)

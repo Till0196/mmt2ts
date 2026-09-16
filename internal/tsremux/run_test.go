@@ -9,10 +9,12 @@ import (
 	"io"
 	"mmt2ts/internal/tlv"
 	"testing"
+	"time"
 
 	"mmt2ts/internal/mpegts"
 	"mmt2ts/internal/preservation"
 	"mmt2ts/internal/si"
+	"mmt2ts/internal/tsdemux"
 )
 
 const (
@@ -23,6 +25,17 @@ const (
 )
 
 func buildCarouselTS(t *testing.T, fill func(r *preservation.Recorder)) []byte {
+	return buildCarouselTSWith(t, carouselTSOptions{fill: fill})
+}
+
+type carouselTSOptions struct {
+	fill    func(r *preservation.Recorder)
+	streams []mpegts.ElementaryStream
+	media   func(w *mpegts.Writer)
+	span    uint64 // 秒。0 なら 4
+}
+
+func buildCarouselTSWith(t *testing.T, o carouselTSOptions) []byte {
 	t.Helper()
 	rec, err := preservation.NewRecorder(preservation.Config{
 		ServiceID: testService, TransportStreamID: 0x4010, OriginalNetworkID: 4,
@@ -31,9 +44,13 @@ func buildCarouselTS(t *testing.T, fill func(r *preservation.Recorder)) []byte {
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
+	span := o.span
+	if span == 0 {
+		span = 4
+	}
 	rec.Observe(testNTPBase)
-	fill(rec)
-	rec.Observe(testNTPBase + (4 << 32))
+	o.fill(rec)
+	rec.Observe(testNTPBase + (span << 32))
 	if err := rec.Finish(4_000_000_000); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
@@ -43,12 +60,16 @@ func buildCarouselTS(t *testing.T, fill func(r *preservation.Recorder)) []byte {
 	if err := w.WriteSection(0x0000, mpegts.BuildPAT(1, 0, []mpegts.Program{{Number: 1, PID: 0x0100}}, 0)); err != nil {
 		t.Fatal(err)
 	}
-	pmt := mpegts.BuildPMT(1, 0, testRealtime, nil, []mpegts.ElementaryStream{
+	streams := append([]mpegts.ElementaryStream{
 		{StreamType: mpegts.StreamTypeDSMCC, PID: testRealtime, Descriptors: mpegts.StreamIdentifierDescriptor(0xe0)},
 		{StreamType: mpegts.StreamTypeDSMCC, PID: testObject, Descriptors: mpegts.StreamIdentifierDescriptor(0xe1)},
-	})
+	}, o.streams...)
+	pmt := mpegts.BuildPMT(1, 0, testRealtime, nil, streams)
 	if err := w.WriteSection(0x0100, pmt); err != nil {
 		t.Fatal(err)
+	}
+	if o.media != nil {
+		o.media(w)
 	}
 	if err := rec.Emit(4_000_000_000, func(pid uint16, section []byte) error {
 		return w.WriteSection(pid, section)
@@ -59,6 +80,119 @@ func buildCarouselTS(t *testing.T, fill func(r *preservation.Recorder)) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func signallingMeta(packetID uint16) preservation.Metadata {
+	var meta preservation.Metadata
+	meta.AddU16(preservation.MetaPacketID, packetID)
+	meta.AddU8(preservation.MetaSignallingKind, preservation.SignallingPA)
+	meta.AddIP(preservation.MetaIPSource, []byte{192, 0, 2, 9})
+	meta.AddIP(preservation.MetaIPDestination, []byte{224, 0, 0, 9})
+	meta.AddU16(preservation.MetaUDPSourcePort, 1111)
+	meta.AddU16(preservation.MetaUDPDestPort, 2222)
+	return meta
+}
+
+// Recorder.Emit は object カルーセルを realtime の後に書くので、窓を短くすれば
+// activation が窓の外へ出た時点でまだ object がない。
+func TestRunWritesCaptionWhoseObjectArrivesAfterItsActivation(t *testing.T) {
+	ttml := []byte("<tt xmlns=\"http://www.w3.org/ns/ttml\">late object</tt>")
+	const objectID = 0x0200000000000001
+	ts := buildCarouselTSWith(t, carouselTSOptions{span: 12, fill: func(rec *preservation.Recorder) {
+		rec.AddRecord(preservation.RecordRawSignalling, preservation.RecordRawExact|preservation.RecordRequired,
+			testNTPBase, signallingMeta(0x0000), buildPAMessage())
+		if err := rec.AddObject(preservation.PackInput{ID: objectID, Class: preservation.ClassTTML,
+			Flags: preservation.ObjectRawExact, MediaType: "application/ttml+xml", Stored: ttml}); err != nil {
+			t.Fatalf("AddObject: %v", err)
+		}
+		var meta preservation.Metadata
+		meta.AddU16(preservation.MetaPacketID, 0xf330)
+		meta.AddU16(preservation.MetaComponentTag, 0x0030)
+		meta.AddU32(preservation.MetaMPUSequence, 7)
+		meta.AddBytes(preservation.MetaSubtitleID, []byte{0x01, 0x02, 0x00, 0x00, 0x00, 0x00})
+		activation := preservation.ObjectActivation{ObjectID: objectID, Generation: 7, Action: preservation.ObjectActivate}
+		rec.AddRecord(preservation.RecordObjectActivation, preservation.RecordRequired,
+			testNTPBase+(1<<32), meta, activation.Encode())
+		rec.AddRecord(preservation.RecordRawSignalling, preservation.RecordRawExact|preservation.RecordRequired,
+			testNTPBase+(10<<32), signallingMeta(0x0000), buildPAMessage())
+	}})
+
+	var out bytes.Buffer
+	report, err := RunWithOptions(bytes.NewReader(ts), &out, Options{Window: time.Second})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(report.Problems) > 0 {
+		t.Fatalf("unexpected problems: %v", report.Problems)
+	}
+	if report.CaptionUnits != 1 {
+		t.Fatalf("CaptionUnits = %d, want 1", report.CaptionUnits)
+	}
+	if !bytes.Contains(out.Bytes(), ttml) {
+		t.Fatal("the caption resource was not written")
+	}
+}
+
+func TestRunReplaysAccessUnitsThroughTheAVMap(t *testing.T) {
+	nal := []byte{0x26, 0x01, 0xaa, 0xbb, 0xcc}
+	annexB := append([]byte{0, 0, 0, 1}, nal...)
+	ts := buildCarouselTSWith(t, carouselTSOptions{
+		streams: []mpegts.ElementaryStream{
+			{StreamType: mpegts.StreamTypeHEVC, PID: 0x1011, Descriptors: mpegts.StreamIdentifierDescriptor(0)},
+		},
+		media: func(w *mpegts.Writer) {
+			if err := w.WriteUnit(0x1011, generalTestPES(0xe0, 90000, annexB), mpegts.Adaptation{RandomAccess: true}); err != nil {
+				t.Fatal(err)
+			}
+		},
+		fill: func(rec *preservation.Recorder) {
+			rec.AddRecord(preservation.RecordRawSignalling, preservation.RecordRawExact|preservation.RecordRequired,
+				testNTPBase, signallingMeta(0x0000), buildPAMessage())
+			rec.AddAVMapEntry(preservation.AVMapEntry{
+				PacketID: 0xf300, OutputPID: 0x1011, MPUSequence: 3, FirstAUOrdinal: 0, AUCount: 1,
+				StartNTP: testNTPBase + (1 << 32), EndNTP: testNTPBase + (1 << 32), AssetType: [4]byte{'h', 'e', 'v', '1'},
+			})
+		},
+	})
+
+	var out bytes.Buffer
+	report, err := Run(bytes.NewReader(ts), &out)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(report.Problems) > 0 {
+		t.Fatalf("unexpected problems: %v", report.Problems)
+	}
+	if report.AVAccessUnits != 1 {
+		t.Fatalf("AVAccessUnits = %d, want 1", report.AVAccessUnits)
+	}
+	samples := readMPUSamples(t, out.Bytes())
+	if len(samples) != 1 || !bytes.Equal(samples[0], sampleFromNALs(nal)) {
+		t.Fatalf("samples = %x, want the one NAL unit", samples)
+	}
+}
+
+func TestAUQueueDropsWrittenUnitsAndKeepsOrdinals(t *testing.T) {
+	var q auQueue
+	for i := range 100 {
+		q.push(tsdemux.PES{Payload: []byte{byte(i)}})
+	}
+	q.dropBefore(60)
+	if q.base != 60 || q.end() != 100 {
+		t.Fatalf("base = %d, end = %d, want 60 and 100", q.base, q.end())
+	}
+	got := q.payloads(60, 63)
+	if len(got) != 3 || got[0][0] != 60 || got[2][0] != 62 {
+		t.Fatalf("payloads(60, 63) = %v", got)
+	}
+	q.dropBefore(10)
+	if q.base != 60 {
+		t.Fatalf("dropping before the base moved it to %d", q.base)
+	}
+	q.dropBefore(1000)
+	if q.base != 100 || len(q.pes) != 0 {
+		t.Fatalf("dropping past the end left base %d and %d units", q.base, len(q.pes))
+	}
 }
 
 func TestRunReplaysRawSignalling(t *testing.T) {
@@ -298,5 +432,54 @@ func TestRunConvertsEveryServiceOfAMultiplex(t *testing.T) {
 	}
 	if len(flows) != 2 {
 		t.Errorf("destination addresses = %d, want one per service", len(flows))
+	}
+}
+
+func TestRunReplaysAcrossAClockGlitch(t *testing.T) {
+	nal := []byte{0x26, 0x01, 0xaa, 0xbb, 0xcc}
+	annexB := append([]byte{0, 0, 0, 1}, nal...)
+	ts := buildCarouselTSWith(t, carouselTSOptions{
+		streams: []mpegts.ElementaryStream{
+			{StreamType: mpegts.StreamTypeHEVC, PID: 0x1011, Descriptors: mpegts.StreamIdentifierDescriptor(0)},
+		},
+		media: func(w *mpegts.Writer) {
+			for _, pts := range []int64{90000, 180000} {
+				if err := w.WriteUnit(0x1011, generalTestPES(0xe0, pts, annexB), mpegts.Adaptation{RandomAccess: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		},
+		fill: func(rec *preservation.Recorder) {
+			rec.AddRecord(preservation.RecordRawSignalling, preservation.RecordRawExact|preservation.RecordRequired,
+				testNTPBase, signallingMeta(0x0000), buildPAMessage())
+			rec.AddAVMapEntry(preservation.AVMapEntry{PacketID: 0xf300, OutputPID: 0x1011, MPUSequence: 3,
+				FirstAUOrdinal: 0, AUCount: 1, StartNTP: testNTPBase + (1 << 32), EndNTP: testNTPBase + (1 << 32)})
+			rec.Observe(testNTPBase + (2 << 32))
+			rec.Observe(testNTPBase + (3600 << 32)) // 壊れた NTP
+			rec.Observe(testNTPBase + (2 << 32) + (1 << 31))
+			rec.AddRecord(preservation.RecordRawSignalling, preservation.RecordRawExact|preservation.RecordRequired,
+				testNTPBase+(3<<32), signallingMeta(0x0000), buildPAMessage())
+			rec.AddAVMapEntry(preservation.AVMapEntry{PacketID: 0xf300, OutputPID: 0x1011, MPUSequence: 4,
+				FirstAUOrdinal: 1, AUCount: 1, StartNTP: testNTPBase + (3 << 32), EndNTP: testNTPBase + (3 << 32)})
+		},
+		span: 5,
+	})
+
+	var out bytes.Buffer
+	report, err := Run(bytes.NewReader(ts), &out)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(report.Problems) > 0 {
+		t.Fatalf("unexpected problems: %v", report.Problems)
+	}
+	if report.AVAccessUnits != 2 {
+		t.Fatalf("AVAccessUnits = %d, want both sides of the glitch", report.AVAccessUnits)
+	}
+	if report.Epochs == 0 {
+		t.Fatal("the report does not mention the epoch change")
+	}
+	if samples := readMPUSamples(t, out.Bytes()); len(samples) != 2 {
+		t.Fatalf("%d samples written, want 2", len(samples))
 	}
 }

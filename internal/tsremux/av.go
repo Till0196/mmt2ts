@@ -39,9 +39,11 @@ func writeHEVCAdmission(w io.Writer, entry preservation.AVMapEntry, annexB []byt
 
 func replayAV(w io.Writer, entry preservation.AVMapEntry, streamType byte, aus [][]byte, seq *mmtwrite.Sequencer, flow generalFlow, rap bool) error {
 	rapPending := rap
+	var header []byte
 	write := func(sample []byte, media bool) error {
-		for fragmentIndex, mpu := range mmtwrite.BuildBroadcastTimedMFUFragments(entry.MPUSequence, sample) {
-			packet := mmtwrite.BuildPacket(mmtwrite.Header{
+		fragmentIndex := 0
+		return mmtwrite.ForEachTimedMFUFragment(sample, func(f mmtwrite.TimedMFUFragment) error {
+			header = mmtwrite.AppendPacketHeader(header[:0], mmtwrite.Header{
 				PayloadType:    mmtwrite.PayloadTypeMPU,
 				PacketID:       entry.PacketID,
 				SequenceNumber: seq.Next(entry.PacketID),
@@ -49,15 +51,15 @@ func replayAV(w io.Writer, entry preservation.AVMapEntry, streamType byte, aus [
 				RAP:            media && fragmentIndex == 0 && rapPending,
 				ExtensionType:  0,
 				Extension:      mmtwrite.ClearScrambleExtension,
-			}, mpu)
+			})
+			// 放送の fragment offset は 0。
+			header = mmtwrite.AppendTimedMFUHeader(header, entry.MPUSequence, 0, f.Indicator, 0, len(f.Data))
+			fragmentIndex++
 			if media {
 				rapPending = false
 			}
-			if err := flow.write(w, packet); err != nil {
-				return err
-			}
-		}
-		return nil
+			return flow.writeParts(w, header, f.Data)
+		})
 	}
 
 	switch streamType {

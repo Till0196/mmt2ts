@@ -106,9 +106,16 @@ func (r *Recorder) installCodecConfig(now int64) error {
 }
 
 func (r *Recorder) installAVMap(now int64) error {
-	payload, err := EncodeAVMap(r.avmap)
+	entries := make([]AVMapEntry, 0, len(r.avmap))
+	for _, slot := range r.avmap {
+		entries = append(entries, slot.entry)
+	}
+	payload, err := EncodeAVMap(entries)
 	if err != nil {
 		return err
+	}
+	for i := range r.avmap {
+		r.avmap[i].installed = true
 	}
 	r.avmapDirty = false
 	return r.realtime.Set(Update{
