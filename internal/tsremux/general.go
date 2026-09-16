@@ -36,6 +36,10 @@ func (f generalFlow) write(w io.Writer, packet []byte) error {
 	return tlvwrite.WriteUDPContext(w, f.cid, f.src, f.dst, f.srcPort, f.dstPort, packet)
 }
 
+func (f generalFlow) writeParts(w io.Writer, parts ...[]byte) error {
+	return tlvwrite.WriteUDPContextParts(w, f.cid, f.src, f.dst, f.srcPort, f.dstPort, parts...)
+}
+
 type generalAsset struct {
 	stream   tsdemux.StreamInfo
 	packetID uint16

@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sync"
 )
 
 const (
@@ -41,14 +42,39 @@ func WriteUDP(w io.Writer, src, dst Endpoint, srcPort, dstPort uint16, udpPayloa
 }
 
 func WriteUDPContext(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, udpPayload []byte) error {
+	return WriteUDPContextParts(w, cid, src, dst, srcPort, dstPort, udpPayload)
+}
+
+func WriteUDPContextParts(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, parts ...[]byte) error {
 	if len(src) == 16 || len(dst) == 16 {
-		return writeCompressedIPv6(w, cid, src, dst, srcPort, dstPort, udpPayload)
+		return writeCompressedIPv6(w, cid, src, dst, srcPort, dstPort, parts...)
 	}
 	if len(src) == 4 || len(dst) == 4 {
-		return writeCompressedIPv4(w, cid, src, dst, srcPort, dstPort, udpPayload)
+		return writeCompressedIPv4(w, cid, src, dst, srcPort, dstPort, parts...)
 	}
-	return WriteIPv4(w, src, dst, srcPort, dstPort, udpPayload)
+	return WriteIPv4(w, src, dst, srcPort, dstPort, join(parts))
 }
+
+func join(parts [][]byte) []byte {
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	out := make([]byte, 0, partsLen(parts))
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+func partsLen(parts [][]byte) int {
+	n := 0
+	for _, p := range parts {
+		n += len(p)
+	}
+	return n
+}
+
+var frames = sync.Pool{New: func() any { b := make([]byte, 0, 4+45+0xffff); return &b }}
 
 func WriteUncompressedUDP(w io.Writer, src, dst Endpoint, srcPort, dstPort uint16, udpPayload []byte) error {
 	if len(src) == 16 || len(dst) == 16 {
@@ -59,39 +85,53 @@ func WriteUncompressedUDP(w io.Writer, src, dst Endpoint, srcPort, dstPort uint1
 
 const DefaultCID = 1
 
-func cidAndSN(cid uint16, payload []byte) uint16 {
+func cidAndSN(cid uint16, parts [][]byte) uint16 {
 	var sn byte
-	if len(payload) >= 12 {
-		sn = payload[11] & 0x0f
+	if len(parts) > 0 && len(parts[0]) >= 12 {
+		sn = parts[0][11] & 0x0f
 	}
 	return cid<<4 | uint16(sn)
 }
 
-func writeCompressedIPv6(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, payload []byte) error {
+func writeCompressedIPv6(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, parts ...[]byte) error {
 	s, d := pad16(src), pad16(dst)
-	b := make([]byte, 0, 45+len(payload))
-	b = binary.BigEndian.AppendUint16(b, cidAndSN(cid, payload))
-	b = append(b, 0x60)
-	b = append(b, 0x60, 0, 0, 0, protoUDP, 1)
-	b = append(b, s[:]...)
-	b = append(b, d[:]...)
-	b = binary.BigEndian.AppendUint16(b, srcPort)
-	b = binary.BigEndian.AppendUint16(b, dstPort)
-	b = append(b, payload...)
-	return writePacket(w, TypeCompressedIP, b)
+	return writeCompressed(w, 45, parts, func(b []byte) []byte {
+		b = binary.BigEndian.AppendUint16(b, cidAndSN(cid, parts))
+		b = append(b, 0x60)
+		b = append(b, 0x60, 0, 0, 0, protoUDP, 1)
+		b = append(b, s[:]...)
+		b = append(b, d[:]...)
+		b = binary.BigEndian.AppendUint16(b, srcPort)
+		return binary.BigEndian.AppendUint16(b, dstPort)
+	})
 }
 
-func writeCompressedIPv4(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, payload []byte) error {
+func writeCompressedIPv4(w io.Writer, cid uint16, src, dst Endpoint, srcPort, dstPort uint16, parts ...[]byte) error {
 	s, d := pad4(src), pad4(dst)
-	b := make([]byte, 0, 23+len(payload))
-	b = binary.BigEndian.AppendUint16(b, cidAndSN(cid, payload))
-	b = append(b, 0x20, 0x45, 0, 0, 0, 0, 0, 1, protoUDP)
-	b = append(b, s[:]...)
-	b = append(b, d[:]...)
-	b = binary.BigEndian.AppendUint16(b, srcPort)
-	b = binary.BigEndian.AppendUint16(b, dstPort)
-	b = append(b, payload...)
-	return writePacket(w, TypeCompressedIP, b)
+	return writeCompressed(w, 23, parts, func(b []byte) []byte {
+		b = binary.BigEndian.AppendUint16(b, cidAndSN(cid, parts))
+		b = append(b, 0x20, 0x45, 0, 0, 0, 0, 0, 1, protoUDP)
+		b = append(b, s[:]...)
+		b = append(b, d[:]...)
+		b = binary.BigEndian.AppendUint16(b, srcPort)
+		return binary.BigEndian.AppendUint16(b, dstPort)
+	})
+}
+
+func writeCompressed(w io.Writer, headerLen int, parts [][]byte, header func([]byte) []byte) error {
+	n := headerLen + partsLen(parts)
+	if n > 0xffff {
+		return errPacketTooLarge
+	}
+	bp := frames.Get().(*[]byte)
+	defer frames.Put(bp)
+	b := header(append((*bp)[:0], SyncByte, TypeCompressedIP, byte(n>>8), byte(n)))
+	for _, p := range parts {
+		b = append(b, p...)
+	}
+	*bp = b
+	_, err := w.Write(b)
+	return err
 }
 
 func pad4(e Endpoint) [4]byte {

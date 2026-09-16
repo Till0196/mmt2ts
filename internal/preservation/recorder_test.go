@@ -605,3 +605,62 @@ func TestAWindowTooLargeForTheProfileIsReportedNotFatal(t *testing.T) {
 		t.Errorf("%d parts were published, want the full %d", parts, MaxSegmentParts)
 	}
 }
+
+func TestClockGlitchStartsANewEpochAndKeepsRecording(t *testing.T) {
+	r := newTestRecorder(t)
+	r.Observe(testNTPBase)
+	r.AddRecord(RecordRawSignalling, RecordRawExact, ntpAfter(100), nil, []byte{1})
+	r.Observe(ntpAfter(1200))
+	r.Observe(ntpAfter(3_600_000)) // 壊れた NTP
+	r.Observe(ntpAfter(1300))      // 本来の時刻へ戻る
+	if got := r.EpochID(); got != 2 {
+		t.Fatalf("epoch = %d, want 2 after a jump forward and back", got)
+	}
+	r.AddRecord(RecordRawSignalling, RecordRawExact, ntpAfter(1400), nil, []byte{2})
+	r.AddRecord(RecordRawSignalling, RecordRawExact, ntpAfter(1900), nil, []byte{3})
+	r.Observe(ntpAfter(2600))
+
+	c := newCollector()
+	if err := r.Emit(0, c.write); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	for seq := uint64(0); seq < 2; seq++ {
+		m, ok := r.realtime.modules[TimedModuleID(seq, 0)]
+		if !ok || m.entry.LogicalID != seq {
+			t.Fatalf("segment %d after the glitch: module %+v", seq, m)
+		}
+		h, _, err := ParseModule(m.stored)
+		if err != nil || h.EpochID != 2 {
+			t.Fatalf("segment %d after the glitch: header %+v, %v", seq, h, err)
+		}
+	}
+}
+
+func TestAVMapEntriesSurviveUntilTheyHaveBeenCarried(t *testing.T) {
+	r := newTestRecorder(t)
+	r.Observe(testNTPBase)
+	r.AddAVMapEntry(AVMapEntry{PacketID: 1, OutputPID: 0x1011, MPUSequence: 1, AUCount: 30,
+		StartNTP: testNTPBase - msToNTP(60_000), EndNTP: testNTPBase - msToNTP(59_000)})
+	for i := range uint64(timedRingSegments * 3) {
+		r.AddRecord(RecordRawSignalling, 0, ntpAfter(i*500+10), nil, []byte{byte(i)})
+		r.Observe(ntpAfter(i*500 + 600))
+	}
+	if got := len(r.avmap); got != 1 {
+		t.Fatalf("the uncarried entry was trimmed: %d entries left", got)
+	}
+	c := newCollector()
+	if err := r.Emit(0, c.write); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	if !r.avmap[0].installed {
+		t.Fatal("Emit did not carry the entry")
+	}
+	for i := range uint64(timedRingSegments + 1) {
+		ms := (timedRingSegments*3+i)*500 + 10
+		r.AddRecord(RecordRawSignalling, 0, ntpAfter(ms), nil, []byte{byte(i)})
+		r.Observe(ntpAfter(ms + 590))
+	}
+	if got := len(r.avmap); got != 0 {
+		t.Fatalf("the carried entry outlived the ring: %d entries left", got)
+	}
+}

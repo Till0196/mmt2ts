@@ -211,3 +211,43 @@ func TestContinuityCounterCountsLostPackets(t *testing.T) {
 		})
 	}
 }
+
+// 長さを申告した PES は、その長さが届いた時点で閉じる。次のパケットを待たない。
+// 任意ヘッダーのない private_stream_2 も同じ。
+func TestDeclaredLengthClosesThePESAtItsBoundary(t *testing.T) {
+	var buf bytes.Buffer
+	w := mpegts.NewWriter(&buf)
+	au := bytes.Repeat([]byte{0xAB}, 400)
+	pes := buildPES(t, 0x000001c0, 90000, 0, au)
+	binary.BigEndian.PutUint16(pes[4:6], uint16(len(pes)-6))
+	if err := w.WriteUnit(0x0101, pes, mpegts.Adaptation{}); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x81, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00}
+	super := append([]byte{0x00, 0x00, 0x01, 0xbf, 0x00, byte(len(body))}, body...)
+	if err := w.WriteUnit(0x0102, super, mpegts.Adaptation{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	d := New()
+	var got []PES
+	d.Handlers.OnPES = func(p PES) { got = append(got, p) }
+	b := buf.Bytes()
+	for len(b) >= packetSize {
+		d.Push(b[:packetSize])
+		b = b[packetSize:]
+	}
+	// Flush の前に閉じていること。
+	if len(got) != 2 {
+		t.Fatalf("got %d PES units before Flush, want 2", len(got))
+	}
+	if !bytes.Equal(got[0].Payload, au) || got[0].PTS != 90000 {
+		t.Fatalf("audio PES = %d bytes, PTS %d", len(got[0].Payload), got[0].PTS)
+	}
+	if got[1].StreamID != 0xbf || got[1].HasPTS || !bytes.Equal(got[1].Payload, body) {
+		t.Fatalf("private_stream_2 PES = %+v", got[1])
+	}
+}

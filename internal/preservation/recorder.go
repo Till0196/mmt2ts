@@ -25,6 +25,11 @@ const (
 	maxSegmentDurationMS     = 1000
 
 	retainedSegments = timedRingSegments
+
+	// NTP がこれより大きく飛んだら、その先は別の epoch として数え直す。
+	// 飛んだ先の時刻で数え続けると、後の record が全部「過去」になる。
+	maxForwardJumpMS  = 10_000
+	maxBackwardJumpMS = 2_000
 )
 
 func (r *Recorder) repeatWindow() uint64 {
@@ -50,6 +55,7 @@ type Config struct {
 
 type Stats struct {
 	Segments          uint64
+	Epochs            uint64
 	Records           uint64
 	Objects           int
 	ObjectBytes       int
@@ -67,6 +73,14 @@ type Stats struct {
 	SegmentDurationMS uint32
 	ShortSegments     bool
 	BulkSegments      uint64
+}
+
+// 項目は一度カルーセルに載せ、そのあと segment が retainedSegments 個閉じるまで
+// 残す。時刻で測ると、媒体の時計と NTP がずれたとき載せる前に捨ててしまう。
+type avmapSlot struct {
+	entry     AVMapEntry
+	addedAt   uint64
+	installed bool
 }
 
 type segment struct {
@@ -93,11 +107,12 @@ type Recorder struct {
 	latestComplete uint64
 	haveComplete   bool
 
-	avmap      []AVMapEntry
-	avmapDirty bool
-	lastAVMap  int64
-	codec      map[uint64]CodecConfig
-	codecDirty bool
+	avmap          []avmapSlot
+	avmapDirty     bool
+	lastAVMap      int64
+	closedSegments uint64
+	codec          map[uint64]CodecConfig
+	codecDirty     bool
 
 	losses  []LossEntry
 	lossSeq uint64
@@ -179,6 +194,10 @@ func (r *Recorder) Observe(ntp uint64) {
 		r.epochBase, r.haveEpoch, r.latestNTP = ntp, true, ntp
 		return
 	}
+	if ntp > r.latestNTP+msToNTP(maxForwardJumpMS) || ntp+msToNTP(maxBackwardJumpMS) < r.latestNTP {
+		r.NewEpoch(ntp)
+		return
+	}
 	if ntp > r.latestNTP {
 		r.latestNTP = ntp
 	}
@@ -188,9 +207,14 @@ func (r *Recorder) Observe(ntp uint64) {
 func (r *Recorder) NewEpoch(ntp uint64) {
 	r.flushOpen()
 	r.epochID++
+	r.stats.Epochs++
 	r.epochBase, r.haveEpoch, r.latestNTP = ntp, true, ntp
 	r.nextSeq = 0
 	r.haveComplete = false
+	r.open = make(map[uint64]*segment)
+	if len(r.avmap) > 0 {
+		r.avmapDirty = true
+	}
 }
 
 func (r *Recorder) UseShortSegments() {
@@ -317,6 +341,7 @@ func (r *Recorder) closeSegment(s *segment) {
 	r.latestComplete, r.haveComplete = s.sequence, true
 	r.nextSeq = s.sequence + 1
 	r.stats.Segments++
+	r.closedSegments++
 	r.trimAVMap()
 }
 
@@ -367,20 +392,23 @@ func renumber(in []Record) []Record {
 }
 
 func (r *Recorder) AddAVMapEntry(e AVMapEntry) {
-	r.avmap = append(r.avmap, e)
+	r.avmap = append(r.avmap, avmapSlot{entry: e, addedAt: r.closedSegments})
 	r.avmapDirty = true
 }
 
 func (r *Recorder) trimAVMap() {
-	if !r.haveComplete || r.latestComplete < retainedSegments {
+	if r.closedSegments < retainedSegments {
 		return
 	}
-	oldest := r.segmentStart(r.latestComplete - retainedSegments)
+	oldest := r.closedSegments - retainedSegments
 	kept := r.avmap[:0]
-	for _, e := range r.avmap {
-		if e.EndNTP == 0 || e.EndNTP >= oldest {
-			kept = append(kept, e)
+	for _, slot := range r.avmap {
+		if !slot.installed || slot.addedAt >= oldest {
+			kept = append(kept, slot)
 		}
+	}
+	for i := len(kept); i < len(r.avmap); i++ {
+		r.avmap[i] = avmapSlot{}
 	}
 	if len(kept) != len(r.avmap) {
 		r.avmapDirty = true
