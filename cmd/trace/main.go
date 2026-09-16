@@ -16,16 +16,17 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"mmt2ts/internal/mpegts"
 	"mmt2ts/internal/tsdemux"
 )
 
 func main() {
-	kind := flag.String("kind", "ts", "ts か tlv")
+	kind := flag.String("kind", "ts", "ts か tlv か es")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: trace -kind ts|tlv <file>")
+		fmt.Fprintln(os.Stderr, "usage: trace -kind ts|tlv|es <file>")
 		os.Exit(2)
 	}
 	file, err := os.Open(flag.Arg(0))
@@ -43,6 +44,13 @@ func main() {
 		traceTS(out, file)
 	case "tlv":
 		traceTLV(out, file)
+	case "es":
+		// 入れ物は拡張子で決める。中身は同じ形の行になるので、どちらから来たかは出力に現れない。
+		if strings.HasSuffix(flag.Arg(0), ".tlv") {
+			traceESTLV(out, file)
+		} else {
+			traceESTS(out, file)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "知らない種別 %q\n", *kind)
 		os.Exit(2)
