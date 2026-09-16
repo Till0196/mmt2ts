@@ -308,30 +308,56 @@ func (d *Demuxer) pmt(b []byte) {
 func (d *Demuxer) pes(pid uint16, st *pidState, start bool, payload []byte, discontinuity, randomAccess bool) {
 	if start {
 		d.closePES(pid, st)
-		if len(payload) < 9 || payload[0] != 0 || payload[1] != 0 || payload[2] != 1 {
-			return
-		}
-		flags := payload[7] >> 6
-		headerLen := int(payload[8])
-		if len(payload) < 9+headerLen {
+		if len(payload) < 6 || payload[0] != 0 || payload[1] != 0 || payload[2] != 1 {
 			return
 		}
 		pes := PES{PID: pid, StreamID: payload[3], Discontinuity: discontinuity, RandomAccess: randomAccess,
 			LostPackets: st.lost}
+		// 任意ヘッダーを持たないストリームがある。ペイロードは6バイト目
+		// から始まり、間には何も無い。
+		body, headerLen := 6, 0
+		if mpegts.HasOptionalHeader(payload[3]) {
+			if len(payload) < 9 {
+				return
+			}
+			flags := payload[7] >> 6
+			headerLen = int(payload[8])
+			if len(payload) < 9+headerLen {
+				return
+			}
+			if flags&0x02 != 0 && headerLen >= 5 {
+				pes.PTS, pes.HasPTS = readTimestamp(payload[9:14]), true
+			}
+			if flags == 0x03 && headerLen >= 10 {
+				pes.DTS, pes.HasDTS = readTimestamp(payload[14:19]), true
+			}
+			body = 9 + headerLen
+		}
 		st.lost = 0
-		if flags&0x02 != 0 && headerLen >= 5 {
-			pes.PTS, pes.HasPTS = readTimestamp(payload[9:14]), true
-		}
-		if flags == 0x03 && headerLen >= 10 {
-			pes.DTS, pes.HasDTS = readTimestamp(payload[14:19]), true
-		}
 		st.pesOpen = true
 		st.pes = pes
-		st.body = append(st.body[:0], payload[9+headerLen:]...)
+		// 長さを申告したパケットは、その分だけ届けば完結する。
+		// 次のパケットが始まるのを待たない。待つと、映像の次の
+		// ピクチャが来るまで音声が出ない。
+		st.declared = 0
+		if length := int(payload[4])<<8 | int(payload[5]); length > 0 {
+			st.declared = length - (body - 6)
+		}
+		st.body = append(st.body[:0], payload[body:]...)
+		d.fullPES(pid, st)
 		return
 	}
 	if st.pesOpen {
 		st.body = append(st.body, payload...)
+		d.fullPES(pid, st)
+	}
+}
+
+// fullPES は申告どおりの長さが揃っていれば閉じる。
+func (d *Demuxer) fullPES(pid uint16, st *pidState) {
+	if st.declared > 0 && len(st.body) >= st.declared {
+		st.body = st.body[:st.declared]
+		d.closePES(pid, st)
 	}
 }
 
