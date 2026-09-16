@@ -334,7 +334,12 @@ func TestDRCSAllocatesAndReusesGlyphs(t *testing.T) {
 		t.Fatalf("definition data unit = % x", unit)
 	}
 	if d.Definitions() != nil {
-		t.Fatal("the same definition was written twice")
+		t.Fatal("a definition was written for a statement that uses no DRCS")
+	}
+	// 次の文で使えば、途中から読み始めても届くようにまた載せる。
+	d.AllocateDRCS('\U0001F600')
+	if d.Definitions() == nil {
+		t.Fatal("the glyph used again was not defined again")
 	}
 }
 
@@ -523,12 +528,17 @@ func TestDivisionParagraphsShareOneStatement(t *testing.T) {
 	if got := bytes.Count(body, []byte{arib.CodeCS}); got != 1 {
 		t.Errorf("the statement clears the screen %d times: % x", got, body)
 	}
-	for _, want := range []string{"242;29", "242;79"} {
-		seq := append([]byte{arib.CodeCSI}, want...)
-		seq = append(seq, 0x20, arib.CSISDP, arib.CodeAPS, 0x40, 0x40)
-		if !bytes.Contains(body, seq) {
-			t.Errorf("no display position %s followed by APS: % x", want, body)
-		}
+	// 字を置いたあとの SDP は無視される。表示領域は二つの段落を包んで
+	// 一度だけ置き、二つ目の段落は ACPS（字の左下）で置く。
+	first := append([]byte{arib.CodeCSI}, "242;29"...)
+	first = append(first, 0x20, arib.CSISDP)
+	if !bytes.Contains(body, first) || bytes.Count(body, []byte{arib.CSISDP}) != 1 {
+		t.Errorf("the display area is not placed once at 242;29: % x", body)
+	}
+	second := append([]byte{arib.CodeCSI}, "242;115"...)
+	second = append(second, 0x20, arib.CSIACPS)
+	if !bytes.Contains(body, second) {
+		t.Errorf("the second paragraph is not placed by ACPS at 242;115: % x", body)
 	}
 	if !bytes.Contains(body, []byte{0x24, 0x26, 0x24, 0x28}) { // うえ
 		t.Errorf("the first paragraph is missing: % x", body)
@@ -561,21 +571,19 @@ func TestBlockSetsItsCharacterSizeBeforeItsPosition(t *testing.T) {
 		},
 	}})[5:]
 
-	ruby := []byte{arib.CodeCSI}
-	ruby = append(ruby, "80;30"...)
-	ruby = append(ruby, 0x20, arib.CSISDF, arib.CodeSSZ, arib.CodeCSI)
-	ruby = append(ruby, "358;419"...)
-	ruby = append(ruby, 0x20, arib.CSISDP, arib.CodeAPS, 0x40, 0x40)
-	if !bytes.Contains(body, ruby) {
-		t.Errorf("the ruby area does not set the small size before its position: % x", body)
+	area := []byte{arib.CodeCSI}
+	area = append(area, "280;90"...)
+	area = append(area, 0x20, arib.CSISDF, arib.CodeCSI)
+	area = append(area, "358;419"...)
+	area = append(area, 0x20, arib.CSISDP, arib.CodeSSZ, arib.CodeAPS, 0x40, 0x40)
+	if !bytes.Contains(body, area) {
+		t.Errorf("the area does not cover both blocks with the small size set before the ruby: % x", body)
 	}
-	base := []byte{arib.CodeCSI}
-	base = append(base, "280;60"...)
-	base = append(base, 0x20, arib.CSISDF, arib.CodeNSZ, arib.CodeCSI)
-	base = append(base, "358;449"...)
-	base = append(base, 0x20, arib.CSISDP, arib.CodeAPS, 0x40, 0x40)
+	base := []byte{arib.CodeNSZ, arib.CodeCSI}
+	base = append(base, "358;485"...)
+	base = append(base, 0x20, arib.CSIACPS)
 	if !bytes.Contains(body, base) {
-		t.Errorf("the base area does not set the normal size before its position: % x", body)
+		t.Errorf("the base does not set the normal size before its ACPS: % x", body)
 	}
 	if got := bytes.Count(body, []byte{arib.CodeSSZ}); got != 1 {
 		t.Errorf("the small size control appears %d times, want once: % x", got, body)
@@ -916,7 +924,7 @@ func TestStatementIsReadableByTheDecoder(t *testing.T) {
 	body := unit[5:]
 
 	got := arib.DecodeString(body)
-	if got.Text != "日本語の\n\r字幕 ABC" {
+	if got.Text != "日本語の\r字幕 ABC" {
 		t.Fatalf("decoded text = %q", got.Text)
 	}
 	if !got.Lossless() {
@@ -947,5 +955,30 @@ func TestWaitIsReadableByTheDecoder(t *testing.T) {
 		if c.Code != arib.CodeTIME || len(c.Params) != 2 || c.Params[0] != 0x20 {
 			t.Errorf("control = %#02x % x, want a TIME with the 02/00 form", c.Code, c.Params)
 		}
+	}
+}
+
+// 空の文書は消去。字幕は次の文書が来るまで出たままになる。
+func TestEmptyDocumentClearsTheScreen(t *testing.T) {
+	s := NewStream(AdditionalInfo{Language: "jpn", TMD: 0xf, DMF: 0xa}, nil)
+	mpu, _ := s.Push(3, mfu(0x30, 1, 0, 0, DataTypeTTML, []byte(`<?xml version="1.0" encoding="utf-8"?><tt></tt>`)))
+	out, err := s.Convert(mpu, Timing{MPUPresentation: 90000, HasMPU: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statement *Output
+	for i := range out {
+		if !out[i].Management {
+			statement = &out[i]
+		}
+	}
+	if statement == nil || !statement.HasPTS || statement.PTS != 90000 {
+		t.Fatalf("no clearing statement at the MPU time: %+v", out)
+	}
+	if !bytes.Contains(statement.Payload, []byte{0x1f, arib.UnitStatementBody, 0, 0, 1, arib.CodeCS}) {
+		t.Fatalf("the statement is not a bare CS: % x", statement.Payload)
+	}
+	if st := s.Stats(); st.Clears != 1 || st.Cues != 0 {
+		t.Fatalf("clears %d, cues %d", st.Clears, st.Cues)
 	}
 }

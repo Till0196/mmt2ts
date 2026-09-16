@@ -65,20 +65,3 @@ func ResolveObject(st *State, obj preservation.ManifestObject) ([]byte, error) {
 	}
 	return joined, nil
 }
-
-func ResolvedObjects(st *State) map[uint64]ResolvedObject {
-	out := make(map[uint64]ResolvedObject)
-	for _, snapshot := range st.Snapshots {
-		for id, obj := range snapshot.Objects {
-			out[id] = obj
-		}
-	}
-	if len(out) == 0 && st.Manifest != nil {
-		for _, obj := range st.Manifest.Objects {
-			if data, err := ResolveObject(st, obj); err == nil {
-				out[obj.ID] = ResolvedObject{Manifest: obj, Data: data}
-			}
-		}
-	}
-	return out
-}

@@ -32,6 +32,8 @@ func run(args []string) error {
 	input := fs.String("i", "-", "input MPEG-2 TS file ('-' for stdin)")
 	output := fs.String("o", "-", "output MMT/TLV file ('-' for stdout)")
 	quiet := fs.Bool("quiet", false, "suppress the conversion report")
+	window := fs.Duration("window", tsremux.DefaultWindow,
+		"how far ahead to read a restoration carousel before writing; bounds memory, must cover the carousel's delay")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -60,7 +62,7 @@ func run(args []string) error {
 		}
 	}()
 
-	report, err := tsremux.Run(in, out)
+	report, err := tsremux.RunWithOptions(in, out, tsremux.Options{Window: *window})
 	if err != nil {
 		return err
 	}

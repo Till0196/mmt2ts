@@ -6,7 +6,6 @@ package carouselin
 
 import (
 	"fmt"
-	"sort"
 
 	"mmt2ts/internal/preservation"
 )
@@ -60,6 +59,7 @@ func newCarousel() *carousel {
 	}
 }
 
+// Segments と AVMap は届いた順に積み、TakeSegments と TakeAVMap で引き取る。
 type State struct {
 	Bootstrap    *preservation.Bootstrap
 	Manifest     *preservation.Manifest
@@ -67,29 +67,35 @@ type State struct {
 	AVMap        []preservation.AVMapEntry
 	LossEntries  []preservation.LossEntry
 
-	Segments map[uint64][]preservation.Record
+	Segments []CompletedSegment
 
 	Objects        map[uint16][]byte
 	ObjectVersions map[uint16]byte
-	Snapshots      []ObjectSnapshot
+	Resolved       map[uint64]ResolvedObject
 
 	segmentParts     map[uint64]map[uint16][]byte
 	segmentPartCount map[uint64]uint16
+	segmentSeen      map[segmentKey]bool
 	lossSeen         map[uint64]bool
 	avMapSeen        map[avMapKey]bool
 	codecConfigSeen  map[uint64]bool
-	snapshotSeen     map[uint64]bool
+	resolvedParts    map[uint64]string
+}
+
+type CompletedSegment struct {
+	Epoch    uint32
+	Sequence uint64
+	Records  []preservation.Record
+}
+
+type segmentKey struct {
+	epoch uint32
+	seq   uint64
 }
 
 type ResolvedObject struct {
 	Manifest preservation.ManifestObject
 	Data     []byte
-}
-
-type ObjectSnapshot struct {
-	Generation   uint32
-	UpdateNumber uint32
-	Objects      map[uint64]ResolvedObject
 }
 
 type avMapKey struct {
@@ -100,15 +106,16 @@ type avMapKey struct {
 
 func newState() State {
 	return State{
-		Segments:         make(map[uint64][]preservation.Record),
 		Objects:          make(map[uint16][]byte),
 		ObjectVersions:   make(map[uint16]byte),
+		Resolved:         make(map[uint64]ResolvedObject),
 		segmentParts:     make(map[uint64]map[uint16][]byte),
 		segmentPartCount: make(map[uint64]uint16),
+		segmentSeen:      make(map[segmentKey]bool),
 		lossSeen:         make(map[uint64]bool),
 		avMapSeen:        make(map[avMapKey]bool),
 		codecConfigSeen:  make(map[uint64]bool),
-		snapshotSeen:     make(map[uint64]bool),
+		resolvedParts:    make(map[uint64]string),
 	}
 }
 
@@ -308,11 +315,11 @@ func (r *Reader) moduleComplete(c *carousel, pid uint16, moduleID uint16, versio
 		}
 		st.Bootstrap = b
 	case preservation.KindTimedSegment:
-		r.addSegmentPart(st, c.role, moduleID, header.LogicalID, payload)
+		r.addSegmentPart(st, c.role, moduleID, header.EpochID, header.LogicalID, payload)
 	case preservation.KindStaticObject:
 		st.Objects[moduleID] = payload
 		st.ObjectVersions[moduleID] = version
-		r.captureSnapshot(st)
+		r.resolveCommitted(st)
 	case preservation.KindObjectManifest:
 		if header.Flags&preservation.FlagCommit == 0 {
 			return
@@ -323,7 +330,7 @@ func (r *Reader) moduleComplete(c *carousel, pid uint16, moduleID uint16, versio
 			return
 		}
 		st.Manifest = m
-		r.captureSnapshot(st)
+		r.resolveCommitted(st)
 	case preservation.KindCodecConfig:
 		cfgs, err := preservation.ParseCodecConfigs(payload)
 		if err != nil {
@@ -363,30 +370,33 @@ func (r *Reader) moduleComplete(c *carousel, pid uint16, moduleID uint16, versio
 	}
 }
 
-func (r *Reader) captureSnapshot(st *State) {
+func (r *Reader) resolveCommitted(st *State) {
 	if st.Manifest == nil {
 		return
 	}
-	key := uint64(st.Manifest.Generation)<<32 | uint64(st.Manifest.UpdateNumber)
-	if st.snapshotSeen[key] {
-		return
-	}
-	snapshot := ObjectSnapshot{
-		Generation: st.Manifest.Generation, UpdateNumber: st.Manifest.UpdateNumber,
-		Objects: make(map[uint64]ResolvedObject, len(st.Manifest.Objects)),
-	}
 	for _, obj := range st.Manifest.Objects {
+		key := partsKey(obj)
+		if st.resolvedParts[obj.ID] == key {
+			continue
+		}
 		data, err := ResolveObject(st, obj)
 		if err != nil {
-			return
+			continue
 		}
-		snapshot.Objects[obj.ID] = ResolvedObject{Manifest: obj, Data: append([]byte(nil), data...)}
+		st.Resolved[obj.ID] = ResolvedObject{Manifest: obj, Data: data}
+		st.resolvedParts[obj.ID] = key
 	}
-	st.snapshotSeen[key] = true
-	st.Snapshots = append(st.Snapshots, snapshot)
 }
 
-func (r *Reader) addSegmentPart(st *State, role preservation.Role, moduleID uint16, seq uint64, payload []byte) {
+func partsKey(obj preservation.ManifestObject) string {
+	b := make([]byte, 0, 3*len(obj.Parts))
+	for _, p := range obj.Parts {
+		b = append(b, byte(p.ModuleID>>8), byte(p.ModuleID), p.ModuleVersion)
+	}
+	return string(b)
+}
+
+func (r *Reader) addSegmentPart(st *State, role preservation.Role, moduleID uint16, epoch uint32, seq uint64, payload []byte) {
 	partNumber, partCount := uint16(0), uint16(1)
 	if st.Bootstrap != nil {
 		for _, e := range st.Bootstrap.Entries {
@@ -415,21 +425,30 @@ func (r *Reader) addSegmentPart(st *State, role preservation.Role, moduleID uint
 		joined = append(joined, p...)
 	}
 	records, err := preservation.ParseSegment(joined)
+	delete(st.segmentParts, seq)
+	delete(st.segmentPartCount, seq)
 	if err != nil {
 		r.problem("segment %d: %v", seq, err)
 		return
 	}
-	st.Segments[seq] = records
-	delete(st.segmentParts, seq)
-	delete(st.segmentPartCount, seq)
+	// 同じ番号が中身を変えて来るのは recorder の時計が戻って振り直したとき。
+	key := segmentKey{epoch: epoch, seq: seq}
+	if st.segmentSeen[key] {
+		r.problem("segment %d of epoch %d arrived again with new content; the recorder's clock went backwards", seq, epoch)
+	}
+	st.segmentSeen[key] = true
+	st.Segments = append(st.Segments, CompletedSegment{Epoch: epoch, Sequence: seq, Records: records})
 }
 
-func (s State) SegmentSequences() []uint64 {
-	out := make([]uint64, 0, len(s.Segments))
-	for seq := range s.Segments {
-		out = append(out, seq)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+func (s *State) TakeSegments() []CompletedSegment {
+	out := s.Segments
+	s.Segments = nil
+	return out
+}
+
+func (s *State) TakeAVMap() []preservation.AVMapEntry {
+	out := s.AVMap
+	s.AVMap = nil
 	return out
 }
 

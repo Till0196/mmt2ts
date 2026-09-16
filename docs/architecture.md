@@ -217,7 +217,8 @@ assetがMPTから消えたときはPMTのcurrentなESから外します。同じ
 #### TTML字幕の変換範囲
 
 `stpp`の各MPUはsubsample番号順に組み立てます。subsample 0のTTML本文を変換対象とし、
-PNG、SVG、AIFF-C PCM、MP3、AAC、SVG font、WOFF fontは外部資源として識別します。
+PNG、SVG、AIFF-C PCM、MP3、AAC、WOFF fontは外部資源として識別します。SVG fontは
+`<glyph>`の輪郭を36×36・4階調に描き、文書の私用面文字をDRCSとして字幕PESへ載せます。
 subsampleの欠落、宣言sizeの後ろにある余分なbyte、hint listとのtype・size不一致を報告します。
 保存カルーセルが有効ならTTML本文、外部資源、元MFUヘッダをobjectとして保存します。
 
@@ -229,10 +230,12 @@ namespace URIとlocal nameで要素・属性を判定します。
 | `tt/xml:lang` | 文書の言語として解析。caption managementの言語はMMT字幕記述子から取得 |
 | `ttp:frameRate` | frame指定時刻の90 kHz変換に使用 |
 | `style`とstyle参照 | body、div、p、spanへ継承・上書き |
-| `region`、`tts:origin`、`tts:extent` | 入力解像度から960×540字幕面へ整数scaleし、表示領域と開始位置を設定 |
+| `region`、`tts:origin`、`tts:extent` | 入力解像度から960×540字幕面へ整数scaleし、全blockを包む表示領域を1回設定。行が収まるまで高さを伸ばす |
+| 2つ目以降の`p`の`region` | 文字を置いた後のSDP/SDFは無視されるので、ACPSで開始位置を指定 |
 | `body/div/p/span` | 1つのdivをcue、各pを同じstatement内のblockとして構成 |
 | `br` | 改行制御へ変換 |
 | `begin`、`end`、`dur` | cueの開始PTSと終了時の消去制御へ変換 |
+| 空の文書（`<tt></tt>`） | 画面消去だけのstatementへ変換。表示中の字幕はこれで消える |
 | `tts:color`、`backgroundColor` | B24既定CLUTの最も近い色へ写像。完全一致か近似かを集計 |
 | `tts:fontSize` | 通常・中間・小型の文字サイズへ写像。任意sizeの近似を報告 |
 | `tts:textOutline` | 縁取り開始・解除と縁色へ変換。太さとblurは未対応として報告 |
@@ -261,14 +264,14 @@ PTSを持ち、文字スーパーは非同期PESとしてPTSを付けません�
 - 太字と斜体
 - cell、em、rem単位の長さ
 - paragraphだけが親divと異なる時刻を持つ構成
-- TTML内のimage要素と、PNG・SVG・font・音声資源の字幕PES化
+- TTML内のimage要素と、PNG・SVG・WOFF font・音声資源の字幕PES化
 - 圧縮されたTTML文書
 - NPTによる時刻制御
 
 未対応propertyと外部資源は種類・件数・byte数を変換レポートへ出します。文字はSIと同じ
 ARIB encoderで8単位符号へ変換し、標準文字、正規化、代替、DRCS、変換不能を分類します。
-現在の通常変換では外部glyph sourceを設定していないため、標準文字・正規化・代替で表せない
-文字はDRCSを捏造せず、変換不能文字として例を含めて報告します。
+DRCSの字形は同じstreamで届いたSVG fontから取り、それ以外の表せない文字は捏造せず、
+変換不能文字として例を含めて報告します。
 
 `internal/remux/appdata`はデータ放送のitem、version、hashとapplicationからの参照を
 収集します。既存のデータ放送BML向けのアプリへ作り替えることはせず、元のシグナリングと資源を
@@ -324,7 +327,11 @@ MPEG-2 TS
 ```
 
 保存カルーセルがある場合は、raw signalling、元asset identity、MPU対応、字幕資源などを
-優先して利用します。入力は`mmt2ts`が生成したTSに限定しません。保存カルーセルを持たない
+優先して利用します。保存情報は元の時刻より遅れてTSに現れる（timed segmentは閉じてから、
+AV対応表はMPUが閉じてから、静的objectはcommitとカルーセルの一周を経てから）ので、
+`tsremux`は届いたrecordを時刻順の待ち行列に積み、先読みの窓より前のものから書きます。
+access unitはAV対応表の項目で書き終えた分から捨て、objectが未着のactivationは届くまで
+待ちます。入力全体を溜めないので、メモリは窓の長さで決まります。入力は`mmt2ts`が生成したTSに限定しません。保存カルーセルを持たない
 ARIB準拠のHEVC放送TSでも、clearなHEVC/AACとPSI/SIから新しいMMT/TLVを構成できます。
 MPEG-2 VideoなどHEVC以外の映像を含む放送TSは、この一般TS入力経路の対象外です。
 
