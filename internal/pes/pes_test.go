@@ -103,3 +103,12 @@ func TestBuildCaptionWithPrivateData(t *testing.T) {
 		t.Fatalf("length = %d", binary.BigEndian.Uint16(got[4:6]))
 	}
 }
+
+// 文字スーパーの private_stream_2 は任意ヘッダーを持たず、長さの直後が本文。
+func TestPrivateStream2HasNoOptionalHeader(t *testing.T) {
+	got := Build(Packet{StreamID: StreamIDPrivate2, HasPTS: true, PTS: 90000, Payload: []byte{0x81, 0xff}})
+	want := []byte{0x00, 0x00, 0x01, 0xbf, 0x00, 0x02, 0x81, 0xff}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got % x, want % x", got, want)
+	}
+}

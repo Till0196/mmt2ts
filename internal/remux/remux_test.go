@@ -1116,3 +1116,61 @@ func hasEITFor(ts []byte, service uint16) bool {
 	}
 	return false
 }
+
+// 文字スーパーは private_stream_2。長さの直後が本文で、PTS は付かない。
+func TestSuperimpositionIsWrittenAsPrivateStream2(t *testing.T) {
+	b := newBuilder()
+	b.mmtp(0x0000, 0x02, false, signalingPayload(pltTable(1)), 0)
+	super := captionAsset(nil, nil)
+	super.tag = 0x0038
+	info := []byte{0x38, 0x00}
+	info = append(info, "jpn"...)
+	info = append(info, 0x40, 0xf3, 0x10) // 種類 01: 文字スーパー、TMD 1111
+	super.descriptors = descriptor(0x8020, append(binary.BigEndian.AppendUint16(nil, 0x0020), info...))
+	b.mmtp(testMPTPID, 0x02, false, signalingPayload(mptTable(1, append(defaultAssets(), super))), 0)
+	b.ntp(testNTPBase)
+	b.mmtp(testCaptionPID, 0x00, true, mpuPayload(300, captionMFU(0, 0, 0, []byte(testTTML))), 0)
+
+	var out bytes.Buffer
+	opts := DefaultOptions()
+	opts.ServiceID = testService
+	report, err := Run(bytes.NewReader(b.buf.Bytes()), &out, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Captions) != 1 || !report.Captions[0].Superimposition {
+		t.Fatalf("captions = %+v", report.Captions)
+	}
+	pid := report.Captions[0].PID
+	found := 0
+	ts := out.Bytes()
+	for i := 0; i+188 <= len(ts); i += 188 {
+		p := ts[i : i+188]
+		if uint16(p[1]&0x1f)<<8|uint16(p[2]) != pid || p[1]&0x40 == 0 {
+			continue
+		}
+		off := 4
+		if p[3]&0x20 != 0 {
+			off += 1 + int(p[4])
+		}
+		d := p[off:]
+		if !bytes.HasPrefix(d, []byte{0x00, 0x00, 0x01, 0xbf}) {
+			t.Fatalf("PES starts with % x, want private_stream_2", d[:6])
+		}
+		if d[6] != 0x81 || d[7] != 0xff {
+			t.Fatalf("no data_identifier right after the length: % x", d[:10])
+		}
+		found++
+	}
+	if found == 0 {
+		t.Fatal("no superimposition PES was written")
+	}
+	check, err := tscheck.Scan(bytes.NewReader(ts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := check.PIDs[pid]
+	if stat.PESUnits != uint64(found) || stat.PESHeaderShort != 0 || stat.PESLengthBad != 0 {
+		t.Fatalf("checker: %+v", stat)
+	}
+}
